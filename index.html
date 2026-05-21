@@ -336,6 +336,9 @@ svg.prev { width: 28px; height: 24px; }
 .arrow-hit { pointer-events: stroke; cursor: pointer; }
 .edge-strip-arrow { fill: transparent; cursor: pointer; pointer-events: all; }
 .edge-strip-arrow:hover { fill: rgba(96,165,250,0.3); }
+/* Edit button drawn inside a selected arrow / fence (re-enable clicks; .ov-item disables them) */
+.edit-btn-svg { pointer-events: auto; }
+.canvas.tool-active .edit-btn-svg { pointer-events: none; }
 
 .overlay {
   position: absolute;
@@ -513,6 +516,28 @@ svg.prev { width: 28px; height: 24px; }
   font-family: inherit;
 }
 .del-shape:hover { background: #dc2626; }
+
+/* Centered "Edit" button shown on a selected shape (opens the info panel) */
+.edit-shape {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 7;
+  background: #1e293b;
+  color: #ffffff;
+  border: 1px solid #ffffff;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+.edit-shape:hover { background: #334155; }
 
 /* Edge strips for measurements */
 .edge { position: absolute; cursor: pointer; z-index: 3; }
@@ -758,6 +783,7 @@ svg.prev { width: 28px; height: 24px; }
 @media (pointer: coarse) {
   /* Larger tap targets for all buttons */
   .tool-btn, .top-action, .card, .menu-btn { min-height: 44px; }
+  .edit-shape { padding: 9px 16px; font-size: 13px; }
   .popup button { min-height: 44px; padding: 10px 14px; }
   .popup .name-chip { min-height: 36px; padding: 8px 12px; }
 
@@ -1027,10 +1053,16 @@ const state = {
   fences: [],     // {id,x1,y1,x2,y2,color,measurements}
   selection: null, // {kind:'shape'|'arrow'|'fence', id}
   editing: false, // when true the selected item's panel is unlocked for editing
+  panelOpen: false, // when true the info panel is shown (selection alone does NOT open it)
   tool: null,     // null|'arrow'|'road'|'driveway'|'fence'
   drawing: null,  // {type,x1,y1,x2,y2} during drag/click draw
   zOrder: [],
 };
+
+// Tap-vs-drag + double-tap detection for selecting / moving / editing items.
+const DRAG_THRESHOLD = 6;   // screen px of movement before a press becomes a drag
+const DOUBLE_TAP_MS = 300;  // window for a second clean tap to count as double
+let lastTapKind = null, lastTapId = null, lastTapTime = 0;
 
 let uidN = 0;
 const uid = () => 'u' + (++uidN) + '_' + Math.random().toString(36).slice(2, 7);
@@ -1236,6 +1268,7 @@ function clearCanvas() {
   state.zOrder = [];
   state.selection = null;
   state.editing = false;
+  state.panelOpen = false;
   state.drawing = null;
   closeMeasurePopup();
   renderPanel();
@@ -1595,8 +1628,14 @@ function createShapeEl(sh) {
     if (e.type === 'mousedown' && e.button !== 0) return;
     if (e.type === 'touchstart') e.preventDefault();
     e.stopPropagation();
-    selectEntity('shape', sh.id);
-    startShapeDrag(sh, e);
+    const ox = sh.x, oy = sh.y;
+    beginItemPointer('shape', sh.id, e, (ddx, ddy) => {
+      const cs = canvasSize();
+      sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + ddx));
+      sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + ddy));
+      const el = shapeEls.get(sh.id);
+      if (el) { el.style.left = sh.x + 'px'; el.style.top = sh.y + 'px'; }
+    });
   };
   el.addEventListener('mousedown', onShapeStart);
   el.addEventListener('touchstart', onShapeStart, { passive: false });
@@ -1671,16 +1710,16 @@ function applyShapeVisual(sh) {
 }
 
 function rebuildSelectionAccessories(el, sh, isSel) {
-  el.querySelectorAll('.handle, .edge, .del-shape').forEach(n => n.remove());
+  el.querySelectorAll('.handle, .edge, .del-shape, .edit-shape').forEach(n => n.remove());
   if (!isSel) return;
 
   const directEdit = DIRECT_EDIT_TYPES.includes(sh.type);
   const measurable = MEASURABLE_SHAPE_TYPES.includes(sh.type);
   // Resize handles are ALWAYS shown for any selected shape so every item can be
-  // resized by dragging. Edge measurement strips stay gated to edit/direct mode
-  // so the measurement workflow is unchanged.
+  // resized by dragging. Edge measurement strips appear only once the info panel
+  // is open (editing), so a plain single-tap selection shows just handles + Edit.
   const handlesVisible = true;
-  const stripsVisible = state.editing || directEdit;
+  const stripsVisible = state.editing;
 
   // 8 resize handles — shown for every selected shape.
   if (handlesVisible) {
@@ -1720,6 +1759,22 @@ function rebuildSelectionAccessories(el, sh, isSel) {
       el.appendChild(s);
     }
   }
+
+  // Centered Edit button — the only in-shape control that opens the info panel.
+  // Shown for every selected shape (tap it, or double-tap the shape, to edit).
+  const editBtn = document.createElement('button');
+  editBtn.className = 'edit-shape';
+  editBtn.type = 'button';
+  editBtn.textContent = 'Edit';
+  editBtn.title = 'Edit details';
+  editBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+  editBtn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    openPanel();
+  });
+  el.appendChild(editBtn);
 
   // Corner delete button — skip for direct-edit types (their delete lives in the panel)
   if (directEdit) return;
@@ -1786,6 +1841,7 @@ function duplicateShape(id) {
   createShapeEl(dup);
   updatePlaceholder();
   selectEntity('shape', dup.id);
+  openPanel(); // keep the panel open on the new copy (matches the old behavior)
 }
 
 function duplicateArrow(id) {
@@ -1809,6 +1865,7 @@ function duplicateArrow(id) {
   state.arrows.push(dup);
   updatePlaceholder();
   selectEntity('arrow', dup.id);
+  openPanel(); // keep the panel open on the new copy (matches the old behavior)
 }
 
 // ============= DRAG / RESIZE =============
@@ -1836,36 +1893,58 @@ function attachDragListeners(onMove) {
   window.addEventListener('touchcancel', up);
 }
 
-function startShapeDrag(sh, e) {
-  const sp = evtPoint(e);
-  const sx = sp.clientX, sy = sp.clientY;
-  const ox = sh.x, oy = sh.y;
-  closeMeasurePopup();
-  attachDragListeners((ev) => {
-    const p = evtPoint(ev);
-    const cs = canvasSize();
-    sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + (p.clientX - sx) / zoom));
-    sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + (p.clientY - sy) / zoom));
-    const el = shapeEls.get(sh.id);
-    if (el) { el.style.left = sh.x + 'px'; el.style.top = sh.y + 'px'; }
-    positionPanel();
-  });
+// ----- Tap vs drag + double-tap selection -----
+function isSelected(kind, id) {
+  return !!(state.selection && state.selection.kind === kind && state.selection.id === id);
 }
 
-function startArrowDrag(a, e) {
+// A clean tap (no drag). First tap selects (no panel); a second tap within the
+// double-tap window opens the info panel as a shortcut.
+function handleItemTap(kind, id) {
+  const now = Date.now();
+  const isDouble = lastTapKind === kind && lastTapId === id && (now - lastTapTime) < DOUBLE_TAP_MS;
+  if (isDouble) {
+    lastTapKind = null; lastTapId = null; lastTapTime = 0;
+    if (!isSelected(kind, id)) selectEntity(kind, id);
+    openPanel();
+    return;
+  }
+  lastTapKind = kind; lastTapId = id; lastTapTime = now;
+  selectEntity(kind, id); // select only — does NOT open the info panel
+}
+
+// Press handler shared by every draggable item. Distinguishes a clean tap
+// (select, or double-tap to edit) from a drag (move only — no selection change
+// and no panel). `applyDrag` receives the move delta in content-space pixels.
+function beginItemPointer(kind, id, e, applyDrag) {
   const sp = evtPoint(e);
   const sx = sp.clientX, sy = sp.clientY;
-  const ox1 = a.x1, oy1 = a.y1, ox2 = a.x2, oy2 = a.y2;
+  let moved = false;
   closeMeasurePopup();
-  attachDragListeners((ev) => {
+  const move = (ev) => {
     const p = evtPoint(ev);
-    const dx = (p.clientX - sx) / zoom;
-    const dy = (p.clientY - sy) / zoom;
-    a.x1 = ox1 + dx; a.y1 = oy1 + dy;
-    a.x2 = ox2 + dx; a.y2 = oy2 + dy;
-    renderOverlay();
-    positionPanel();
-  });
+    const dxs = p.clientX - sx, dys = p.clientY - sy;
+    if (!moved && Math.hypot(dxs, dys) > DRAG_THRESHOLD) moved = true;
+    if (moved) {
+      if (ev.type === 'touchmove' && ev.cancelable) ev.preventDefault();
+      applyDrag(dxs / zoom, dys / zoom);
+      if (state.panelOpen) positionPanel();
+    }
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    window.removeEventListener('touchmove', move);
+    window.removeEventListener('touchend', up);
+    window.removeEventListener('touchcancel', up);
+    if (moved) persistCanvas();   // drag → just persist the new position
+    else handleItemTap(kind, id); // clean tap → select / edit
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  window.addEventListener('touchmove', move, { passive: false });
+  window.addEventListener('touchend', up);
+  window.addEventListener('touchcancel', up);
 }
 
 function rotateFence(f, angleDeg) {
@@ -1880,22 +1959,6 @@ function rotateFence(f, angleDeg) {
   f.y1 = cy - halfDy;
   f.x2 = cx + halfDx;
   f.y2 = cy + halfDy;
-}
-
-function startFenceDrag(f, e) {
-  const sp = evtPoint(e);
-  const sx = sp.clientX, sy = sp.clientY;
-  const ox1 = f.x1, oy1 = f.y1, ox2 = f.x2, oy2 = f.y2;
-  closeMeasurePopup();
-  attachDragListeners((ev) => {
-    const p = evtPoint(ev);
-    const dx = (p.clientX - sx) / zoom;
-    const dy = (p.clientY - sy) / zoom;
-    f.x1 = ox1 + dx; f.y1 = oy1 + dy;
-    f.x2 = ox2 + dx; f.y2 = oy2 + dy;
-    renderOverlay();
-    positionPanel();
-  });
 }
 
 function startResize(sh, dir, e) {
@@ -1959,6 +2022,42 @@ function deleteFence(id) {
   updatePlaceholder();
 }
 
+// Small "Edit" button drawn at the midpoint of a selected arrow / fence. Tapping
+// it opens the info panel (mirrors the centered Edit button on shapes).
+function makeSvgEditButton(cx, cy) {
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.classList.add('edit-btn-svg');
+  g.style.cursor = 'pointer';
+  const rw = 46, rh = 24;
+  const rect = document.createElementNS(SVG_NS, 'rect');
+  rect.setAttribute('x', cx - rw / 2);
+  rect.setAttribute('y', cy - rh / 2);
+  rect.setAttribute('width', rw);
+  rect.setAttribute('height', rh);
+  rect.setAttribute('rx', 6);
+  rect.setAttribute('fill', '#1e293b');
+  rect.setAttribute('stroke', '#ffffff');
+  rect.setAttribute('stroke-width', '1');
+  g.appendChild(rect);
+  const t = document.createElementNS(SVG_NS, 'text');
+  t.setAttribute('x', cx);
+  t.setAttribute('y', cy + 1);
+  t.setAttribute('text-anchor', 'middle');
+  t.setAttribute('dominant-baseline', 'middle');
+  t.setAttribute('fill', '#ffffff');
+  t.setAttribute('font-size', '12');
+  t.setAttribute('font-weight', '700');
+  t.style.pointerEvents = 'none';
+  t.textContent = 'Edit';
+  g.appendChild(t);
+  const open = (e) => { e.stopPropagation(); e.preventDefault(); openPanel(); };
+  g.addEventListener('mousedown', (e) => e.stopPropagation());
+  g.addEventListener('touchstart', (e) => { e.stopPropagation(); e.preventDefault(); }, { passive: false });
+  g.addEventListener('click', open);
+  g.addEventListener('touchend', open);
+  return g;
+}
+
 function renderOverlay() {
   // Each arrow / fence is rendered as its own positioned SVG so it can take a
   // real z-index and interleave with the shape layers.
@@ -2003,8 +2102,12 @@ function renderOverlay() {
       if (e.type === 'mousedown' && e.button !== 0) return;
       if (e.type === 'touchstart') e.preventDefault();
       e.stopPropagation();
-      selectEntity('fence', f.id);
-      startFenceDrag(f, e);
+      const ox1 = f.x1, oy1 = f.y1, ox2 = f.x2, oy2 = f.y2;
+      beginItemPointer('fence', f.id, e, (ddx, ddy) => {
+        f.x1 = ox1 + ddx; f.y1 = oy1 + ddy;
+        f.x2 = ox2 + ddx; f.y2 = oy2 + ddy;
+        renderOverlay();
+      });
     };
     hit.addEventListener('mousedown', onFenceStart);
     hit.addEventListener('touchstart', onFenceStart, { passive: false });
@@ -2088,6 +2191,9 @@ function renderOverlay() {
       }
     }
 
+    // Centered Edit button when the fence is selected (opens the info panel).
+    if (isSel) g.appendChild(makeSvgEditButton((f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
+
     zoomLayerEl.appendChild(g);
   }
 
@@ -2142,8 +2248,12 @@ function renderOverlay() {
       if (e.type === 'mousedown' && e.button !== 0) return;
       if (e.type === 'touchstart') e.preventDefault();
       e.stopPropagation();
-      selectEntity('arrow', a.id);
-      startArrowDrag(a, e);
+      const ox1 = a.x1, oy1 = a.y1, ox2 = a.x2, oy2 = a.y2;
+      beginItemPointer('arrow', a.id, e, (ddx, ddy) => {
+        a.x1 = ox1 + ddx; a.y1 = oy1 + ddy;
+        a.x2 = ox2 + ddx; a.y2 = oy2 + ddy;
+        renderOverlay();
+      });
     };
     hit.addEventListener('mousedown', onArrowStart);
     hit.addEventListener('touchstart', onArrowStart, { passive: false });
@@ -2234,6 +2344,9 @@ function renderOverlay() {
       }
     }
 
+    // Centered Edit button when the arrow is selected (opens the info panel).
+    if (isSel) g.appendChild(makeSvgEditButton((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
+
     zoomLayerEl.appendChild(g);
   }
 
@@ -2290,9 +2403,12 @@ function renderOverlay() {
 
 // ============= SELECTION =============
 
+// Select an item: shows its resize handles + centered Edit button, but does NOT
+// open the info panel (panelOpen stays false). The panel opens only via openPanel().
 function selectEntity(kind, id) {
   closeMeasurePopup();
   state.editing = false;
+  state.panelOpen = false;
   state.selection = { kind, id };
   if (kind === 'shape') {
     state.zOrder = state.zOrder.filter(x => x !== id);
@@ -2303,9 +2419,22 @@ function selectEntity(kind, id) {
   renderPanel();
 }
 
+// Open the info panel for the current selection (Edit button or double-tap).
+// Opens directly in editable mode so the user can change name/color/etc.
+function openPanel() {
+  if (!state.selection) return;
+  state.panelOpen = true;
+  state.editing = true;
+  for (const sh of state.shapes) applyShapeVisual(sh);
+  renderOverlay();
+  renderPanel();
+  positionPanel();
+}
+
 function deselect() {
   state.selection = null;
   state.editing = false;
+  state.panelOpen = false;
   closeMeasurePopup();
   for (const sh of state.shapes) applyShapeVisual(sh);
   renderOverlay();
@@ -2315,7 +2444,9 @@ function deselect() {
 // ============= ENTITY PANEL =============
 
 function renderPanel() {
-  if (!state.selection) {
+  // The panel is shown only when an item is selected AND the panel was opened
+  // (via the Edit button or a double-tap). A plain selection keeps it hidden.
+  if (!state.selection || !state.panelOpen) {
     entityPopup.style.display = 'none';
     entityPopup.innerHTML = '';
     return;
@@ -2899,6 +3030,8 @@ function placeFromSidebar(kind) {
       addFence({ id, x1, y1: cy, x2, y2: cy, color: '#000000', measurements: emptyMeasurements() });
       selectEntity('fence', id);
     }
+    // A freshly placed item opens its panel so it can be configured right away.
+    openPanel();
     return;
   }
 
@@ -2907,14 +3040,8 @@ function placeFromSidebar(kind) {
   const x = Math.max(0, Math.min(cs.w - def.w, (cs.w - def.w) / 2 + off));
   const y = Math.max(0, Math.min(cs.h - def.h, (cs.h - def.h) / 2 + off));
   addShape(kind, x, y, def.w, def.h); // selects the new shape
-
-  // Unnamed shapes open the panel ready for the user to type a name.
-  if (UNNAMED_TYPES.includes(kind)) {
-    state.editing = true;
-    renderPanel();
-    const sh = state.shapes.find(s => s.id === state.selection.id);
-    if (sh) applyShapeVisual(sh);
-  }
+  // Open the panel so the user can immediately name / configure the new shape.
+  openPanel();
 }
 
 function init() {
@@ -2966,6 +3093,7 @@ function init() {
         state.drawing = null;
         setTool(null);
         selectEntity('fence', newId);
+        openPanel();
       } else {
         state.drawing = null;
         renderOverlay();
@@ -3026,6 +3154,7 @@ function init() {
         // can immediately tweak its distance / colour / measurements.
         setTool(null);
         selectEntity('arrow', newId);
+        openPanel();
       }
     } else if (d.type === 'road' || d.type === 'driveway') {
       const dx = Math.abs(d.x2 - d.x1);
@@ -3042,6 +3171,7 @@ function init() {
         rw = Math.min(rw, cs.w - fx);
         rh = Math.min(rh, cs.h - fy);
         addShape(d.type, fx, fy, rw, rh);
+        openPanel();
       }
     }
 
