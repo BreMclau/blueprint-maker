@@ -96,6 +96,123 @@ svg.prev { width: 32px; height: 26px; }
 .save-pdf-btn:disabled { opacity: 0.7; cursor: progress; }
 .save-pdf-btn svg { flex-shrink: 0; }
 
+.bp-btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 600;
+  font-family: inherit;
+  width: 100%;
+  transition: background 120ms, border-color 120ms, transform 80ms;
+}
+.bp-btn:hover { background: #334155; border-color: #475569; }
+.bp-btn:active { transform: translateY(1px); }
+.bp-btn svg { flex-shrink: 0; }
+
+/* ----- My Blueprints drawer ----- */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms;
+  z-index: 200;
+}
+.drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  max-width: 90vw;
+  background: #0f172a;
+  color: #e2e8f0;
+  z-index: 201;
+  transform: translateX(100%);
+  transition: transform 220ms ease;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -6px 0 22px rgba(0, 0, 0, 0.35);
+}
+.drawer.open { transform: translateX(0); }
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid #1e293b;
+  font-weight: 700;
+  font-size: 16px;
+}
+.drawer-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.drawer-close:hover { color: #e2e8f0; }
+.drawer-actions { padding: 12px 16px; border-bottom: 1px solid #1e293b; }
+.drawer-load-file {
+  width: 100%;
+  background: #3b82f6;
+  border: 1px solid #2563eb;
+  color: white;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.drawer-load-file:hover { background: #2563eb; }
+.drawer-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px; }
+.bp-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.bp-load {
+  flex: 1;
+  text-align: left;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: inherit;
+  min-width: 0;
+}
+.bp-load:hover { background: #334155; border-color: #475569; }
+.bp-name { font-weight: 600; font-size: 13px; word-break: break-word; }
+.bp-date { font-size: 11px; color: #94a3b8; }
+.bp-icon {
+  width: 42px;
+  flex-shrink: 0;
+  border: 1px solid #334155;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.bp-icon:hover { background: #334155; }
+.bp-del:hover { background: #ef4444; border-color: #ef4444; color: white; }
+.bp-empty { color: #64748b; text-align: center; padding: 24px 12px; font-size: 13px; }
+
 .notes-bar {
   flex-shrink: 0;
   background: #0f172a;
@@ -569,6 +686,19 @@ svg.prev { width: 32px; height: 26px; }
       </svg>
       Save as PDF
     </button>
+    <button class="bp-btn" id="saveBlueprintBtn" type="button" title="Save this blueprint in your browser">
+      <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+        <path d="M4 3h9l3 3v11H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M7 3v4h6V3M7 17v-5h6v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      Save Blueprint
+    </button>
+    <button class="bp-btn" id="myBlueprintsBtn" type="button" title="Open your saved blueprints">
+      <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+        <path d="M3 5h5l2 2h7v9H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      My Blueprints
+    </button>
     <div>
       <h3>Shapes</h3>
       <div class="cards">
@@ -664,6 +794,19 @@ svg.prev { width: 32px; height: 26px; }
 
 <div class="popup" id="entityPopup" style="display:none"></div>
 <div class="popup" id="measurePopup" style="display:none"></div>
+
+<div class="drawer-backdrop" id="blueprintsBackdrop"></div>
+<aside class="drawer" id="blueprintsDrawer" aria-label="My Blueprints">
+  <div class="drawer-header">
+    <span>My Blueprints</span>
+    <button class="drawer-close" id="blueprintsClose" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div class="drawer-actions">
+    <button class="drawer-load-file" id="loadFromFileBtn" type="button">Load from File…</button>
+    <input type="file" id="blueprintFileInput" accept="application/json,.json" style="display:none">
+  </div>
+  <div class="drawer-list" id="blueprintsList"></div>
+</aside>
 
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
@@ -854,88 +997,269 @@ function topNames(n) {
 
 // ============= CANVAS PERSISTENCE (localStorage) =============
 
-const CANVAS_KEY = 'blueprint.canvas';
+const CANVAS_KEY = 'blueprint.canvas';     // auto-saved working state
+const NOTES_PERSIST_KEY = 'blueprint.notes';
+const BLUEPRINTS_KEY = 'blueprint.savedBlueprints'; // named, dated saves
+
+// A plain-object snapshot of everything on the canvas (+ notes).
+function snapshotState() {
+  const ta = document.getElementById('notesTextarea');
+  return {
+    version: 1,
+    shapes: state.shapes,
+    arrows: state.arrows,
+    fences: state.fences,
+    zOrder: state.zOrder,
+    notes: ta ? ta.value : '',
+  };
+}
 
 function persistCanvas() {
+  // Auto-save excludes notes — notes save themselves on every keystroke, so
+  // including a stale copy here could overwrite fresher notes on reload.
   try {
-    const data = {
+    localStorage.setItem(CANVAS_KEY, JSON.stringify({
       version: 1,
       shapes: state.shapes,
       arrows: state.arrows,
       fences: state.fences,
       zOrder: state.zOrder,
-    };
-    localStorage.setItem(CANVAS_KEY, JSON.stringify(data));
+    }));
   } catch (_) {}
+}
+
+// Wipe the canvas (DOM + state) so a fresh dataset can be loaded in.
+function clearCanvas() {
+  for (const el of shapeEls.values()) el.remove();
+  shapeEls.clear();
+  state.shapes = [];
+  state.arrows = [];
+  state.fences = [];
+  state.zOrder = [];
+  state.selection = null;
+  state.editing = false;
+  state.drawing = null;
+  closeMeasurePopup();
+  renderPanel();
+  renderOverlay();
+}
+
+// Rebuild the whole canvas from a data object (used by load + import + restore).
+function applyCanvasData(data) {
+  if (!data || typeof data !== 'object') return;
+  clearCanvas();
+
+  const loadedShapes = Array.isArray(data.shapes) ? data.shapes : [];
+  const loadedArrows = Array.isArray(data.arrows) ? data.arrows : [];
+  const loadedFences = Array.isArray(data.fences) ? data.fences : [];
+
+  // Normalize each loaded entity defensively (handles older / partial data)
+  state.shapes = loadedShapes.map(sh => ({
+    id: sh.id || uid(),
+    type: sh.type,
+    x: Number(sh.x) || 0,
+    y: Number(sh.y) || 0,
+    w: Number(sh.w) || MIN_SIZE,
+    h: Number(sh.h) || MIN_SIZE,
+    name: sh.name || '',
+    color: sh.color || '',
+    opacity: (typeof sh.opacity === 'number') ? sh.opacity : 1,
+    layer: (typeof sh.layer === 'number') ? sh.layer : (LAYER_DEFAULTS[sh.type] || 4),
+    seq: (typeof sh.seq === 'number') ? sh.seq : nextSeq(),
+    measurements: cloneMeasurements(sh.measurements),
+  })).filter(sh => sh.type);
+
+  state.arrows = loadedArrows.map(a => ({
+    id: a.id || uid(),
+    x1: Number(a.x1) || 0, y1: Number(a.y1) || 0,
+    x2: Number(a.x2) || 0, y2: Number(a.y2) || 0,
+    color: a.color || '#000000',
+    distance: a.distance || '',
+    layer: (typeof a.layer === 'number') ? a.layer : LAYER_DEFAULTS.arrow,
+    seq: (typeof a.seq === 'number') ? a.seq : nextSeq(),
+    measurements: cloneMeasurements(a.measurements),
+  }));
+
+  state.fences = loadedFences.map(f => ({
+    id: f.id || uid(),
+    x1: Number(f.x1) || 0, y1: Number(f.y1) || 0,
+    x2: Number(f.x2) || 0, y2: Number(f.y2) || 0,
+    color: f.color || '#000000',
+    layer: (typeof f.layer === 'number') ? f.layer : LAYER_DEFAULTS.fence,
+    seq: (typeof f.seq === 'number') ? f.seq : nextSeq(),
+    measurements: cloneMeasurements(f.measurements),
+  }));
+
+  // Keep the sequence counter ahead of any restored seq values
+  const allSeq = [
+    ...state.shapes.map(s => s.seq || 0),
+    ...state.arrows.map(a => a.seq || 0),
+    ...state.fences.map(f => f.seq || 0),
+  ];
+  if (allSeq.length) zSeq = Math.max(zSeq, ...allSeq);
+
+  // Re-derive zOrder so it stays in sync with the loaded shapes
+  const validIds = new Set(state.shapes.map(s => s.id));
+  state.zOrder = (Array.isArray(data.zOrder) ? data.zOrder : []).filter(id => validIds.has(id));
+  for (const sh of state.shapes) {
+    if (!state.zOrder.includes(sh.id)) state.zOrder.push(sh.id);
+  }
+
+  // Build DOM for the loaded shapes, then render the SVG overlay
+  for (const sh of state.shapes) createShapeEl(sh);
+  renderOverlay();
+
+  // Notes (only present in named/imported saves; auto-save handles its own)
+  if (typeof data.notes === 'string') {
+    const ta = document.getElementById('notesTextarea');
+    if (ta) ta.value = data.notes;
+    try { localStorage.setItem(NOTES_PERSIST_KEY, data.notes); } catch (_) {}
+  }
+
+  updatePlaceholder();
 }
 
 function loadCanvas() {
   try {
     const raw = localStorage.getItem(CANVAS_KEY);
     if (!raw) return;
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== 'object') return;
-
-    const loadedShapes = Array.isArray(data.shapes) ? data.shapes : [];
-    const loadedArrows = Array.isArray(data.arrows) ? data.arrows : [];
-
-    // Normalize each loaded entity defensively (handles older / partial data)
-    state.shapes = loadedShapes.map(sh => ({
-      id: sh.id || uid(),
-      type: sh.type,
-      x: Number(sh.x) || 0,
-      y: Number(sh.y) || 0,
-      w: Number(sh.w) || MIN_SIZE,
-      h: Number(sh.h) || MIN_SIZE,
-      name: sh.name || '',
-      color: sh.color || '',
-      opacity: (typeof sh.opacity === 'number') ? sh.opacity : 1,
-      layer: (typeof sh.layer === 'number') ? sh.layer : (LAYER_DEFAULTS[sh.type] || 4),
-      seq: (typeof sh.seq === 'number') ? sh.seq : nextSeq(),
-      measurements: cloneMeasurements(sh.measurements),
-    })).filter(sh => sh.type);
-
-    state.arrows = loadedArrows.map(a => ({
-      id: a.id || uid(),
-      x1: Number(a.x1) || 0, y1: Number(a.y1) || 0,
-      x2: Number(a.x2) || 0, y2: Number(a.y2) || 0,
-      color: a.color || '#000000',
-      distance: a.distance || '',
-      layer: (typeof a.layer === 'number') ? a.layer : LAYER_DEFAULTS.arrow,
-      seq: (typeof a.seq === 'number') ? a.seq : nextSeq(),
-      measurements: cloneMeasurements(a.measurements),
-    }));
-
-    const loadedFences = Array.isArray(data.fences) ? data.fences : [];
-    state.fences = loadedFences.map(f => ({
-      id: f.id || uid(),
-      x1: Number(f.x1) || 0, y1: Number(f.y1) || 0,
-      x2: Number(f.x2) || 0, y2: Number(f.y2) || 0,
-      color: f.color || '#000000',
-      layer: (typeof f.layer === 'number') ? f.layer : LAYER_DEFAULTS.fence,
-      seq: (typeof f.seq === 'number') ? f.seq : nextSeq(),
-      measurements: cloneMeasurements(f.measurements),
-    }));
-
-    // Keep the sequence counter ahead of any restored seq values
-    const allSeq = [
-      ...state.shapes.map(s => s.seq || 0),
-      ...state.arrows.map(a => a.seq || 0),
-      ...state.fences.map(f => f.seq || 0),
-    ];
-    if (allSeq.length) zSeq = Math.max(zSeq, ...allSeq);
-
-    // Re-derive zOrder so it stays in sync with the loaded shapes
-    const validIds = new Set(state.shapes.map(s => s.id));
-    state.zOrder = (Array.isArray(data.zOrder) ? data.zOrder : []).filter(id => validIds.has(id));
-    for (const sh of state.shapes) {
-      if (!state.zOrder.includes(sh.id)) state.zOrder.push(sh.id);
-    }
-
-    // Build DOM for the loaded shapes, then render the SVG overlay for arrows
-    for (const sh of state.shapes) createShapeEl(sh);
-    renderOverlay();
+    applyCanvasData(JSON.parse(raw));
   } catch (_) {}
+}
+
+// ----- Named, dated blueprints -----
+
+function loadBlueprintList() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(BLUEPRINTS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
+function saveBlueprintList(list) {
+  try { localStorage.setItem(BLUEPRINTS_KEY, JSON.stringify(list)); return true; }
+  catch (_) { return false; }
+}
+
+function saveBlueprint() {
+  const name = window.prompt('Name this blueprint:', '');
+  if (name == null) return;            // cancelled
+  const trimmed = name.trim();
+  if (!trimmed) { alert('Please enter a name.'); return; }
+  const list = loadBlueprintList();
+  list.push({
+    id: uid(),
+    name: trimmed,
+    savedAt: new Date().toISOString(),
+    data: JSON.parse(JSON.stringify(snapshotState())),
+  });
+  if (saveBlueprintList(list)) {
+    alert('Saved "' + trimmed + '".');
+  } else {
+    alert('Could not save — browser storage may be full.');
+  }
+}
+
+function deleteBlueprintEntry(id) {
+  const entry = loadBlueprintList().find(e => e.id === id);
+  if (entry && !confirm('Delete "' + entry.name + '"? This cannot be undone.')) return;
+  saveBlueprintList(loadBlueprintList().filter(e => e.id !== id));
+  renderBlueprintsList();
+}
+
+function loadBlueprintEntry(entry) {
+  if (!entry || !entry.data) return;
+  applyCanvasData(entry.data);
+  persistCanvas();      // make the loaded blueprint the current working state
+  closeBlueprintsDrawer();
+}
+
+function downloadBlueprint(entry) {
+  try {
+    const json = JSON.stringify(entry, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (entry.name || 'blueprint').replace(/[^\w\-]+/g, '_') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (_) {}
+}
+
+function formatSavedAt(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
+}
+
+function openBlueprintsDrawer() {
+  renderBlueprintsList();
+  document.getElementById('blueprintsDrawer').classList.add('open');
+  document.getElementById('blueprintsBackdrop').classList.add('open');
+}
+function closeBlueprintsDrawer() {
+  document.getElementById('blueprintsDrawer').classList.remove('open');
+  document.getElementById('blueprintsBackdrop').classList.remove('open');
+}
+
+function renderBlueprintsList() {
+  const container = document.getElementById('blueprintsList');
+  if (!container) return;
+  container.innerHTML = '';
+  const list = loadBlueprintList().slice()
+    .sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+  if (!list.length) {
+    container.innerHTML = '<div class="bp-empty">No saved blueprints yet.</div>';
+    return;
+  }
+  for (const entry of list) {
+    const row = document.createElement('div');
+    row.className = 'bp-row';
+
+    const loadBtn = document.createElement('button');
+    loadBtn.type = 'button';
+    loadBtn.className = 'bp-load';
+    loadBtn.innerHTML =
+      '<span class="bp-name">' + escHtml(entry.name) + '</span>' +
+      '<span class="bp-date">' + escHtml(formatSavedAt(entry.savedAt)) + '</span>';
+    loadBtn.addEventListener('click', () => loadBlueprintEntry(entry));
+    row.appendChild(loadBtn);
+
+    const dlBtn = document.createElement('button');
+    dlBtn.type = 'button';
+    dlBtn.className = 'bp-icon';
+    dlBtn.title = 'Download as file';
+    dlBtn.textContent = '↓';
+    dlBtn.addEventListener('click', (e) => { e.stopPropagation(); downloadBlueprint(entry); });
+    row.appendChild(dlBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'bp-icon bp-del';
+    delBtn.title = 'Delete';
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteBlueprintEntry(entry.id); });
+    row.appendChild(delBtn);
+
+    container.appendChild(row);
+  }
+}
+
+function importBlueprintFile(file) {
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const parsed = JSON.parse(ev.target.result);
+      const data = (parsed && parsed.data) ? parsed.data : parsed;
+      applyCanvasData(data);
+      persistCanvas();
+      closeBlueprintsDrawer();
+    } catch (err) {
+      alert('Could not load this file — it does not look like a valid blueprint.');
+    }
+  };
+  reader.readAsText(file);
 }
 
 function emptyMeasurements() {
@@ -2473,7 +2797,9 @@ function init() {
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      if (state.drawing) { state.drawing = null; renderOverlay(); }
+      const drawer = document.getElementById('blueprintsDrawer');
+      if (drawer && drawer.classList.contains('open')) closeBlueprintsDrawer();
+      else if (state.drawing) { state.drawing = null; renderOverlay(); }
       else if (state.tool) setTool(null);
       else if (state.selection) deselect();
     }
@@ -2483,6 +2809,26 @@ function init() {
   window.addEventListener('resize', () => {
     if (state.selection) positionPanel();
   });
+
+  // Save / load blueprint buttons
+  const saveBpBtn = document.getElementById('saveBlueprintBtn');
+  if (saveBpBtn) saveBpBtn.addEventListener('click', saveBlueprint);
+  const myBpBtn = document.getElementById('myBlueprintsBtn');
+  if (myBpBtn) myBpBtn.addEventListener('click', openBlueprintsDrawer);
+  const bpClose = document.getElementById('blueprintsClose');
+  if (bpClose) bpClose.addEventListener('click', closeBlueprintsDrawer);
+  const bpBackdrop = document.getElementById('blueprintsBackdrop');
+  if (bpBackdrop) bpBackdrop.addEventListener('click', closeBlueprintsDrawer);
+  const loadFileBtn = document.getElementById('loadFromFileBtn');
+  const fileInput = document.getElementById('blueprintFileInput');
+  if (loadFileBtn && fileInput) {
+    loadFileBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) importBlueprintFile(file);
+      fileInput.value = ''; // allow re-selecting the same file later
+    });
+  }
 
   // Save as PDF button — uses jsPDF + html2canvas (loaded from CDN above)
   const savePdfBtn = document.getElementById('savePdfBtn');
