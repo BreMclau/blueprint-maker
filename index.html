@@ -448,12 +448,26 @@ svg.prev { width: 28px; height: 24px; }
   z-index: 1;
   font-size: 13px;
   font-weight: 600;
-  color: #1e293b;
+  color: #000000; /* labels default to black; applyShapeVisual flips to white on dark fills */
   pointer-events: none;
   padding: 0 10px;
   text-align: center;
   word-break: break-word;
   line-height: 1.2;
+}
+
+/* Width / Height size inputs in the selection panel */
+.size-row { display: flex; gap: 10px; margin-top: 6px; }
+.size-field { flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 600; color: #475569; }
+.size-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1e293b;
 }
 
 /* Resize handles */
@@ -975,6 +989,22 @@ const COLOR_NAMES = {
   '#1e3a8a': 'Navy',      '#14b8a6': 'Teal',      '#84cc16': 'Lime Green', '#800000': 'Maroon',
 };
 const MIN_SIZE = 60;
+
+// Canvas pixels per foot — used to show/edit shape dimensions in feet.
+const PX_PER_FOOT = 10;
+const MIN_SIZE_FT = Math.round((MIN_SIZE / PX_PER_FOOT) * 10) / 10;
+function pxToFeet(px) { return Math.round((px / PX_PER_FOOT) * 10) / 10; }
+function feetToPx(ft) { return ft * PX_PER_FOOT; }
+// Width / Height (in feet) inputs shown in every shape's selection panel.
+function sizeBlockHtml(sh) {
+  return '<div class="title" style="margin-top:12px;">Size (feet)</div>' +
+    '<div class="size-row">' +
+      '<label class="size-field">Width' +
+        '<input type="number" min="' + MIN_SIZE_FT + '" step="0.5" data-role="width-ft" value="' + pxToFeet(sh.w) + '" autocomplete="off"></label>' +
+      '<label class="size-field">Height' +
+        '<input type="number" min="' + MIN_SIZE_FT + '" step="0.5" data-role="height-ft" value="' + pxToFeet(sh.h) + '" autocomplete="off"></label>' +
+    '</div>';
+}
 
 function markerId(color) {
   return 'ah-' + (color || '#000000').slice(1).toLowerCase();
@@ -1646,10 +1676,13 @@ function rebuildSelectionAccessories(el, sh, isSel) {
 
   const directEdit = DIRECT_EDIT_TYPES.includes(sh.type);
   const measurable = MEASURABLE_SHAPE_TYPES.includes(sh.type);
-  const handlesVisible = state.editing || directEdit;
+  // Resize handles are ALWAYS shown for any selected shape so every item can be
+  // resized by dragging. Edge measurement strips stay gated to edit/direct mode
+  // so the measurement workflow is unchanged.
+  const handlesVisible = true;
+  const stripsVisible = state.editing || directEdit;
 
-  // 8 resize handles — always on for direct-edit types (their panels have no
-  // Edit button); edit-mode-only for everything else.
+  // 8 resize handles — shown for every selected shape.
   if (handlesVisible) {
     const dirs = [
       ['nw','h-nw'], ['n','h-n'], ['ne','h-ne'],
@@ -1671,8 +1704,8 @@ function rebuildSelectionAccessories(el, sh, isSel) {
     }
   }
 
-  // Edge measurement strips — shown alongside the handles for measurable types.
-  if (handlesVisible && measurable) {
+  // Edge measurement strips — shown for measurable types in edit/direct mode.
+  if (stripsVisible && measurable) {
     for (const side of ['top','right','bottom','left']) {
       const s = document.createElement('div');
       s.className = 'edge edge-' + side;
@@ -1793,6 +1826,8 @@ function attachDragListeners(onMove) {
     window.removeEventListener('touchmove', move);
     window.removeEventListener('touchend', up);
     window.removeEventListener('touchcancel', up);
+    // Persist the result of the drag / resize so it survives a reload.
+    persistCanvas();
   };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
@@ -1889,6 +1924,11 @@ function startResize(sh, dir, e) {
       el.style.width = nw + 'px';
       el.style.height = nh + 'px';
     }
+    // Live-update the panel's Width/Height (feet) fields as the user drags.
+    const wIn = entityPopup.querySelector('input[data-role="width-ft"]');
+    const hIn = entityPopup.querySelector('input[data-role="height-ft"]');
+    if (wIn) wIn.value = pxToFeet(nw);
+    if (hIn) hIn.value = pxToFeet(nh);
     positionPanel();
   });
 }
@@ -2301,24 +2341,27 @@ function renderPanel() {
       html =
         '<div class="entity-label">' + label + '</div>' +
         '<div class="title">Color</div>' + swatches +
+        sizeBlockHtml(sh) +
         '<div class="row">' +
           '<button class="danger" data-role="delete" type="button">Delete</button>' +
           '<button class="primary" data-role="save" type="button">Save</button>' +
         '</div>';
     } else if (sh.type === 'tree' || sh.type === 'bush') {
-      // Tree / Bush — minimal panel: just a Delete button.
+      // Tree / Bush — minimal panel: size + a Delete button.
       // The 8 resize handles are always on (rendered by rebuildSelectionAccessories).
       html =
+        sizeBlockHtml(sh) +
         '<div class="row">' +
           '<button class="danger" data-role="delete" type="button">Delete</button>' +
         '</div>';
     } else if (sh.type === 'septic' || sh.type === 'wellhead') {
-      // Fixed-label utility shapes — always editable: colors + measurements +
+      // Fixed-label utility shapes — always editable: colors + size + measurements +
       // Duplicate + Delete + Save (no Edit toggle).
       const label = sh.type === 'septic' ? 'Septic Tank' : 'Well Head';
       html =
         '<div class="entity-label">' + label + '</div>' +
         '<div class="title">Color</div>' + swatches +
+        sizeBlockHtml(sh) +
         measurementsBlockHtml(sh.measurements) +
         '<div class="row">' +
           '<button data-role="duplicate" type="button">Duplicate</button>' +
@@ -2328,12 +2371,13 @@ function renderPanel() {
           '<button class="primary" data-role="save" type="button">Save</button>' +
         '</div>';
     } else {
-      // Regular shapes (square/rectangle/circle/triangle) — name + measurements
+      // Regular shapes (square/rectangle/circle/triangle) — name + size + measurements
       html =
         '<div class="title">Name</div>' +
         '<input type="text" data-role="name" value="' + escHtml(sh.name) + '" placeholder="Untitled" autocomplete="off">' +
         '<div class="name-chips" data-role="chips"></div>' +
         '<div class="title" style="margin-top:12px;">Color</div>' + swatches +
+        sizeBlockHtml(sh) +
         measurementsBlockHtml(sh.measurements) +
         '<div class="row">' +
           '<button data-role="duplicate" type="button">Duplicate</button>' +
@@ -2561,6 +2605,40 @@ function wirePanel() {
     });
   }
 
+  // Width / Height (feet) inputs — type an exact size. These stay in sync with
+  // handle resizing (handles update these values; these update the shape).
+  const widthInput = entityPopup.querySelector('input[data-role="width-ft"]');
+  const heightInput = entityPopup.querySelector('input[data-role="height-ft"]');
+  function applySizeFromInput(which, valFt) {
+    const sh = state.shapes.find(s => s.id === sel.id);
+    if (!sh) return;
+    let px = feetToPx(valFt);
+    if (!isFinite(px) || px <= 0) return;
+    px = Math.max(MIN_SIZE, px);
+    const cs = canvasSize();
+    if (which === 'w') sh.w = Math.min(px, cs.w - sh.x);
+    else sh.h = Math.min(px, cs.h - sh.y);
+    applyShapeVisual(sh);
+    positionPanel();
+  }
+  if (widthInput) {
+    widthInput.addEventListener('input', () => applySizeFromInput('w', parseFloat(widthInput.value)));
+    // On blur, snap the field to the shape's actual (clamped) width.
+    widthInput.addEventListener('change', () => {
+      const sh = state.shapes.find(s => s.id === sel.id);
+      if (sh) widthInput.value = pxToFeet(sh.w);
+      persistCanvas();
+    });
+  }
+  if (heightInput) {
+    heightInput.addEventListener('input', () => applySizeFromInput('h', parseFloat(heightInput.value)));
+    heightInput.addEventListener('change', () => {
+      const sh = state.shapes.find(s => s.id === sel.id);
+      if (sh) heightInput.value = pxToFeet(sh.h);
+      persistCanvas();
+    });
+  }
+
   // Lock all inputs when the panel is in read-only mode. Range inputs ignore
   // `readonly`, so use `disabled` for those (and checkboxes/radios). Roads,
   // driveways, trees, and bushes are always directly editable so they skip this.
@@ -2568,6 +2646,8 @@ function wirePanel() {
   if (!shouldUnlockPanel()) {
     entityPopup.querySelectorAll('input').forEach(inp => {
       if (inp.dataset.role === 'opacity') return;
+      // Width / Height inputs are always editable so any shape can be resized.
+      if (inp.dataset.role === 'width-ft' || inp.dataset.role === 'height-ft') return;
       const t = inp.type;
       if (t === 'range' || t === 'checkbox' || t === 'radio') {
         inp.disabled = true;
