@@ -1,0 +1,4 @@
+# Cloudflare Pages: never serve a stale HTML page from the browser/edge cache.
+# This guarantees visitors always get the newest deploy immediately.
+/*
+  Cache-Control: no-cache, no-store, must-revalidate
