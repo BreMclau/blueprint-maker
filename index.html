@@ -367,6 +367,62 @@ svg.prev { width: 28px; height: 24px; }
   font-weight: 500;
 }
 
+/* ---------- Zoom ---------- */
+/* All scalable canvas content lives in this layer so it can be scaled as one
+   unit. The compass and zoom controls sit OUTSIDE it and never scale. */
+.zoom-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0; /* anchor scaling at the top-left so positions stay relative */
+}
+.zoom-controls {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 100000000; /* above all canvas content, like the compass */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.zoom-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #1e293b;
+  color: #ffffff;
+  border: 1px solid #475569;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  padding: 0;
+}
+.zoom-btn:hover { background: #334155; }
+.zoom-btn:active { background: #475569; }
+.zoom-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 3px 4px;
+  min-width: 46px;
+  text-align: center;
+  user-select: none;
+}
+
 /* ---------- Shapes ---------- */
 .shape {
   position: absolute;
@@ -831,6 +887,7 @@ svg.prev { width: 28px; height: 24px; }
   </aside>
 
   <div class="canvas" id="canvas">
+   <div class="zoom-layer" id="zoomLayer">
     <svg class="overlay" id="overlay">
       <defs>
         <marker id="ah-000000" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#000000"/></marker>
@@ -855,6 +912,12 @@ svg.prev { width: 28px; height: 24px; }
       <g id="ovDrawing"></g>
     </svg>
     <div class="placeholder" id="placeholder">Drag a shape from the sidebar to begin</div>
+   </div>
+    <div class="zoom-controls">
+      <button class="zoom-btn" id="zoomInBtn" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+      <span class="zoom-label" id="zoomLabel">100%</span>
+      <button class="zoom-btn" id="zoomOutBtn" type="button" aria-label="Zoom out" title="Zoom out">&minus;</button>
+    </div>
     <div class="compass-wrap">
       <button class="compass-btn" id="compassBtn" type="button" aria-label="Rotate compass 90 degrees">
         <svg id="compassSvg" width="84" height="84" viewBox="0 0 100 100">
@@ -946,6 +1009,7 @@ const escHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<'
 // ============= DOM REFS =============
 
 const canvasEl = document.getElementById('canvas');
+const zoomLayerEl = document.getElementById('zoomLayer');
 const overlayEl = document.getElementById('overlay');
 const ovFences = document.getElementById('ovFences');
 const ovArrows = document.getElementById('ovArrows');
@@ -1016,6 +1080,26 @@ function changeLayer(delta) {
 
 // ============= HELPERS =============
 
+// ----- Zoom -----
+// `zoom` scales only the #zoomLayer (all canvas content). The canvas element
+// itself, the compass, and the zoom buttons are never scaled. Because content
+// is scaled but pointer events arrive in screen pixels, every screen->content
+// conversion (canvasPoint + drag/resize deltas) divides by `zoom`.
+const ZOOM_MIN = 0.5, ZOOM_MAX = 2, ZOOM_STEP = 0.1;
+let zoom = 1;
+function applyZoom() {
+  zoomLayerEl.style.transform = 'scale(' + zoom + ')';
+  const lbl = document.getElementById('zoomLabel');
+  if (lbl) lbl.textContent = Math.round(zoom * 100) + '%';
+}
+function setZoom(z) {
+  // Round to one decimal so repeated +/- steps stay clean (no float drift).
+  zoom = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)) * 10) / 10;
+  applyZoom();
+}
+function zoomIn() { setZoom(zoom + ZOOM_STEP); }
+function zoomOut() { setZoom(zoom - ZOOM_STEP); }
+
 // Normalize mouse and touch events to a single {clientX, clientY}
 function evtPoint(e) {
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
@@ -1025,9 +1109,12 @@ function evtPoint(e) {
 function canvasPoint(e) {
   const r = canvasEl.getBoundingClientRect();
   const p = evtPoint(e);
-  return { x: p.clientX - r.left, y: p.clientY - r.top };
+  // Divide by zoom so taps map to content coordinates regardless of scale.
+  return { x: (p.clientX - r.left) / zoom, y: (p.clientY - r.top) / zoom };
 }
 function canvasSize() {
+  // Logical content size = unscaled canvas viewport (canvasEl is never scaled),
+  // so clamping bounds stay constant at every zoom level.
   const r = canvasEl.getBoundingClientRect();
   return { w: r.width, h: r.height };
 }
@@ -1484,7 +1571,7 @@ function createShapeEl(sh) {
   el.addEventListener('mousedown', onShapeStart);
   el.addEventListener('touchstart', onShapeStart, { passive: false });
 
-  canvasEl.appendChild(el);
+  zoomLayerEl.appendChild(el);
   shapeEls.set(sh.id, el);
   applyShapeVisual(sh);
 }
@@ -1722,8 +1809,8 @@ function startShapeDrag(sh, e) {
   attachDragListeners((ev) => {
     const p = evtPoint(ev);
     const cs = canvasSize();
-    sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + (p.clientX - sx)));
-    sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + (p.clientY - sy)));
+    sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + (p.clientX - sx) / zoom));
+    sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + (p.clientY - sy) / zoom));
     const el = shapeEls.get(sh.id);
     if (el) { el.style.left = sh.x + 'px'; el.style.top = sh.y + 'px'; }
     positionPanel();
@@ -1737,8 +1824,8 @@ function startArrowDrag(a, e) {
   closeMeasurePopup();
   attachDragListeners((ev) => {
     const p = evtPoint(ev);
-    const dx = p.clientX - sx;
-    const dy = p.clientY - sy;
+    const dx = (p.clientX - sx) / zoom;
+    const dy = (p.clientY - sy) / zoom;
     a.x1 = ox1 + dx; a.y1 = oy1 + dy;
     a.x2 = ox2 + dx; a.y2 = oy2 + dy;
     renderOverlay();
@@ -1767,8 +1854,8 @@ function startFenceDrag(f, e) {
   closeMeasurePopup();
   attachDragListeners((ev) => {
     const p = evtPoint(ev);
-    const dx = p.clientX - sx;
-    const dy = p.clientY - sy;
+    const dx = (p.clientX - sx) / zoom;
+    const dy = (p.clientY - sy) / zoom;
     f.x1 = ox1 + dx; f.y1 = oy1 + dy;
     f.x2 = ox2 + dx; f.y2 = oy2 + dy;
     renderOverlay();
@@ -1784,7 +1871,7 @@ function startResize(sh, dir, e) {
   attachDragListeners((ev) => {
     const p = evtPoint(ev);
     const cs = canvasSize();
-    const dx = p.clientX - sx, dy = p.clientY - sy;
+    const dx = (p.clientX - sx) / zoom, dy = (p.clientY - sy) / zoom;
     let nx = ox, ny = oy, nw = ow, nh = oh;
     if (dir.includes('e')) nw = Math.max(MIN_SIZE, ow + dx);
     if (dir.includes('w')) { nw = Math.max(MIN_SIZE, ow - dx); nx = ox + (ow - nw); }
@@ -1961,7 +2048,7 @@ function renderOverlay() {
       }
     }
 
-    canvasEl.appendChild(g);
+    zoomLayerEl.appendChild(g);
   }
 
   // Arrows
@@ -2107,7 +2194,7 @@ function renderOverlay() {
       }
     }
 
-    canvasEl.appendChild(g);
+    zoomLayerEl.appendChild(g);
   }
 
   // Live drawing preview (unused after click-to-place; kept harmless)
@@ -2896,6 +2983,26 @@ function init() {
     rotateCompass();
   });
 
+  // Zoom buttons — work for both mouse clicks and finger taps. stopPropagation
+  // keeps a tap on a button from reaching the canvas; preventDefault on
+  // touchstart suppresses the synthetic click so each tap fires the action once.
+  function wireZoomButton(btn, fn) {
+    if (!btn) return;
+    btn.addEventListener('mousedown', (e) => e.stopPropagation());
+    btn.addEventListener('touchstart', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      fn();
+    }, { passive: false });
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fn();
+    });
+  }
+  wireZoomButton(document.getElementById('zoomInBtn'), zoomIn);
+  wireZoomButton(document.getElementById('zoomOutBtn'), zoomOut);
+  applyZoom(); // set initial transform + "100%" label
+
   // Keyboard
   window.addEventListener('keydown', (e) => {
     const t = e.target;
@@ -2960,11 +3067,18 @@ function init() {
       savePdfBtn.disabled = true;
       savePdfBtn.innerHTML = 'Saving…';
 
+      const pdfPrevZoom = zoom;
+      const zoomControlsEl = document.querySelector('.zoom-controls');
+
       try {
         // Clear selection and any popups so handles / blue rings / floating panels
         // don't get baked into the export.
         deselect();
         closeMeasurePopup();
+        // Always capture at 100% zoom (so the full plan fits) and hide the zoom
+        // buttons so they aren't baked into the PDF. Both are restored in finally.
+        zoomLayerEl.style.transform = 'scale(1)';
+        if (zoomControlsEl) zoomControlsEl.style.visibility = 'hidden';
         // Yield one frame so the DOM updates land before we capture.
         await new Promise(r => requestAnimationFrame(r));
 
@@ -3050,6 +3164,10 @@ function init() {
         console.error('PDF export failed:', err);
         alert('PDF export failed: ' + (err && err.message ? err.message : err));
       } finally {
+        // Restore the user's zoom level and the zoom buttons.
+        zoom = pdfPrevZoom;
+        applyZoom();
+        if (zoomControlsEl) zoomControlsEl.style.visibility = '';
         savePdfBtn.disabled = false;
         savePdfBtn.innerHTML = originalHtml;
       }
