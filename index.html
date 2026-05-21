@@ -34,7 +34,9 @@ body { display: flex; flex-direction: column; }
 }
 .sidebar.open { transform: translateX(0); }
 
-.menu-head { display: flex; align-items: center; justify-content: space-between; }
+/* Push the title clear of the fixed hamburger button, which overlays this
+   corner while the drawer is open. */
+.menu-head { display: flex; align-items: center; justify-content: space-between; padding-left: 46px; }
 .menu-title { font-weight: 700; font-size: 15px; }
 .sidebar-close {
   background: none;
@@ -56,22 +58,29 @@ body { display: flex; flex-direction: column; }
 }
 .sidebar-backdrop.open { display: block; }
 
-/* Hamburger button — always visible, lives in the top toolbar */
+/* Hamburger button — fixed to the very top-left, always on top of everything.
+   Pinned here (rather than in the toolbar flow) so it can never be covered and
+   so it sits over the toolbar band, never over the canvas where shapes live. */
 .menu-btn {
+  position: fixed;
+  top: 6px;
+  left: 6px;
+  z-index: 2147483647; /* max int — above the drawer, compass, popups, everything */
   flex-shrink: 0;
-  width: 42px;
-  height: 42px;
+  width: 48px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1e293b;
-  color: #e2e8f0;
-  border: 1px solid #334155;
+  background: #0f172a;   /* solid dark so it stands out on canvas or panels */
+  color: #ffffff;        /* white icon */
+  border: 1px solid #475569;
   border-radius: 8px;
   cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }
-.menu-btn:hover { background: #334155; }
-.menu-btn:active { background: #475569; }
+.menu-btn:hover { background: #1e293b; }
+.menu-btn:active { background: #334155; }
 
 /* Always-visible toolbar action buttons (Save as PDF / Save Blueprint / My Blueprints) */
 .topbar-actions { display: flex; gap: 6px; flex-shrink: 0; }
@@ -254,6 +263,12 @@ svg.prev { width: 28px; height: 24px; }
   background: #0f172a;
   border-bottom: 1px solid #1e293b;
   padding: 8px 12px;
+  /* Reserve room at the top-left for the fixed hamburger button so toolbar
+     content never sits under it, and keep the bar at least as tall as the
+     button so the button stays within this band and never overlaps the canvas. */
+  padding-left: 64px;
+  min-height: 56px;
+  box-sizing: border-box;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -711,7 +726,7 @@ svg.prev { width: 28px; height: 24px; }
 }
 
 @media (max-height: 600px), (max-width: 600px) {
-  .notes-bar { padding: 6px 10px; }
+  .notes-bar { padding: 6px 10px; padding-left: 64px; }
   .notes-bar-textarea { height: 32px; }
 }
 </style>
@@ -2732,9 +2747,14 @@ function placeFromSidebar(kind) {
 }
 
 function init() {
-  // Mobile sidebar drawer controls
+  // Tools & Shapes drawer controls.
+  // The menu opens ONLY from a deliberate tap on this hamburger button — nothing
+  // else in the app calls openSidebar(). Stop the event here so the tap can never
+  // bubble to other handlers (or be confused with a canvas/shape interaction).
   const menuBtn = document.getElementById('menuBtn');
-  if (menuBtn) menuBtn.addEventListener('click', () => {
+  if (menuBtn) menuBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
     const sb = document.getElementById('sidebar');
     if (sb && sb.classList.contains('open')) closeSidebar();
     else openSidebar();
