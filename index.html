@@ -539,6 +539,43 @@ svg.prev { width: 28px; height: 24px; }
 }
 .edit-shape:hover { background: #334155; }
 
+/* Rotation handle above a selected shape (HTML), connected by a short line */
+.rotate-handle {
+  position: absolute;
+  top: -40px;
+  left: 50%;
+  margin-left: -14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #3b82f6;
+  border: 2px solid #ffffff;
+  color: #ffffff;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  z-index: 8;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+  user-select: none;
+  touch-action: none;
+}
+.rotate-handle::after { /* connector line from the handle down to the shape top */
+  content: '';
+  position: absolute;
+  top: 26px;
+  left: 50%;
+  margin-left: -1px;
+  width: 2px;
+  height: 14px;
+  background: #3b82f6;
+}
+/* SVG rotate handle for selected arrows / fences (.ov-item disables pointer events) */
+.rotate-handle-svg { pointer-events: auto; }
+.canvas.tool-active .rotate-handle-svg { pointer-events: none; }
+
 /* Edge strips for measurements */
 .edge { position: absolute; cursor: pointer; z-index: 3; }
 .edge:hover { background: rgba(96,165,250,0.3); }
@@ -1063,6 +1100,8 @@ const state = {
 const DRAG_THRESHOLD = 6;   // screen px of movement before a press becomes a drag
 const DOUBLE_TAP_MS = 300;  // window for a second clean tap to count as double
 let lastTapKind = null, lastTapId = null, lastTapTime = 0;
+let activeDrag = null;      // cancel fn for an in-progress single-finger item drag
+let gesture = null;         // active two-finger pan/pinch gesture state
 
 let uidN = 0;
 const uid = () => 'u' + (++uidN) + '_' + Math.random().toString(36).slice(2, 7);
@@ -1149,8 +1188,10 @@ function changeLayer(delta) {
 // conversion (canvasPoint + drag/resize deltas) divides by `zoom`.
 const ZOOM_MIN = 0.5, ZOOM_MAX = 2, ZOOM_STEP = 0.1;
 let zoom = 1;
+let panX = 0, panY = 0; // view offset in screen px (two-finger pan)
 function applyZoom() {
-  zoomLayerEl.style.transform = 'scale(' + zoom + ')';
+  // Pan first, then scale (origin 0,0). canvasPoint inverts this exactly.
+  zoomLayerEl.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + zoom + ')';
   const lbl = document.getElementById('zoomLabel');
   if (lbl) lbl.textContent = Math.round(zoom * 100) + '%';
 }
@@ -1162,6 +1203,58 @@ function setZoom(z) {
 function zoomIn() { setZoom(zoom + ZOOM_STEP); }
 function zoomOut() { setZoom(zoom - ZOOM_STEP); }
 
+// ----- Two-finger pan + pinch zoom (mobile / tablet) -----
+function twoFingerInfo(e) {
+  const a = e.touches[0], b = e.touches[1];
+  const dx = b.clientX - a.clientX, dy = b.clientY - a.clientY;
+  return {
+    dist: Math.hypot(dx, dy) || 1,
+    midX: (a.clientX + b.clientX) / 2,
+    midY: (a.clientY + b.clientY) / 2,
+  };
+}
+function onGestureStart(e) {
+  if (e.touches.length !== 2) return;
+  // Two fingers down → take over: cancel any single-finger drag (reverting it)
+  // and stop the event so no shape-drag / canvas-draw handler also runs.
+  if (activeDrag) { activeDrag(); activeDrag = null; }
+  e.preventDefault();
+  e.stopPropagation();
+  const info = twoFingerInfo(e);
+  gesture = {
+    startDist: info.dist,
+    startZoom: zoom, startPanX: panX, startPanY: panY,
+    // Content point under the initial pinch midpoint — kept fixed while zooming.
+    anchorMidX: info.midX, anchorMidY: info.midY,
+  };
+  window.addEventListener('touchmove', onGestureMove, { passive: false });
+  window.addEventListener('touchend', onGestureEnd);
+  window.addEventListener('touchcancel', onGestureEnd);
+}
+function onGestureMove(e) {
+  if (!gesture || e.touches.length < 2) return;
+  e.preventDefault();
+  const info = twoFingerInfo(e);
+  const rect = canvasEl.getBoundingClientRect();
+  let newZoom = gesture.startZoom * (info.dist / gesture.startDist);
+  newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+  // Content point that was under the starting midpoint (using the start view).
+  const cx = (gesture.anchorMidX - rect.left - gesture.startPanX) / gesture.startZoom;
+  const cy = (gesture.anchorMidY - rect.top - gesture.startPanY) / gesture.startZoom;
+  // Keep that content point under the current finger midpoint → pan + pinch.
+  panX = info.midX - rect.left - cx * newZoom;
+  panY = info.midY - rect.top - cy * newZoom;
+  zoom = newZoom;
+  applyZoom();
+}
+function onGestureEnd(e) {
+  if (e.touches.length >= 2) return; // still pinching
+  gesture = null;
+  window.removeEventListener('touchmove', onGestureMove);
+  window.removeEventListener('touchend', onGestureEnd);
+  window.removeEventListener('touchcancel', onGestureEnd);
+}
+
 // Normalize mouse and touch events to a single {clientX, clientY}
 function evtPoint(e) {
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
@@ -1171,8 +1264,8 @@ function evtPoint(e) {
 function canvasPoint(e) {
   const r = canvasEl.getBoundingClientRect();
   const p = evtPoint(e);
-  // Divide by zoom so taps map to content coordinates regardless of scale.
-  return { x: (p.clientX - r.left) / zoom, y: (p.clientY - r.top) / zoom };
+  // Invert the zoomLayer transform (pan then scale) to get content coordinates.
+  return { x: (p.clientX - r.left - panX) / zoom, y: (p.clientY - r.top - panY) / zoom };
 }
 function canvasSize() {
   // Logical content size = unscaled canvas viewport (canvasEl is never scaled),
@@ -1295,6 +1388,7 @@ function applyCanvasData(data) {
     name: sh.name || '',
     color: sh.color || '',
     opacity: (typeof sh.opacity === 'number') ? sh.opacity : 1,
+    rotation: (typeof sh.rotation === 'number') ? sh.rotation : 0,
     layer: (typeof sh.layer === 'number') ? sh.layer : (LAYER_DEFAULTS[sh.type] || 4),
     seq: (typeof sh.seq === 'number') ? sh.seq : nextSeq(),
     measurements: cloneMeasurements(sh.measurements),
@@ -1306,6 +1400,7 @@ function applyCanvasData(data) {
     x2: Number(a.x2) || 0, y2: Number(a.y2) || 0,
     color: a.color || '#000000',
     distance: a.distance || '',
+    rotation: (typeof a.rotation === 'number') ? a.rotation : 0,
     layer: (typeof a.layer === 'number') ? a.layer : LAYER_DEFAULTS.arrow,
     seq: (typeof a.seq === 'number') ? a.seq : nextSeq(),
     measurements: cloneMeasurements(a.measurements),
@@ -1316,6 +1411,7 @@ function applyCanvasData(data) {
     x1: Number(f.x1) || 0, y1: Number(f.y1) || 0,
     x2: Number(f.x2) || 0, y2: Number(f.y2) || 0,
     color: f.color || '#000000',
+    rotation: (typeof f.rotation === 'number') ? f.rotation : 0,
     layer: (typeof f.layer === 'number') ? f.layer : LAYER_DEFAULTS.fence,
     seq: (typeof f.seq === 'number') ? f.seq : nextSeq(),
     measurements: cloneMeasurements(f.measurements),
@@ -1578,6 +1674,7 @@ function addShape(type, x, y, w, h) {
     name: '',
     color: '',
     opacity: 1,
+    rotation: 0,
     layer: LAYER_DEFAULTS[type] || 4,
     seq: nextSeq(),
     measurements: emptyMeasurements(),
@@ -1654,6 +1751,9 @@ function applyShapeVisual(sh) {
   el.style.height = sh.h + 'px';
   el.style.zIndex = String(zIndexOf(sh, sh.type));
   el.style.opacity = (sh.opacity != null ? sh.opacity : 1);
+  // Rotation about the shape's center (handles + rotate handle are children, so
+  // they rotate with it). transform-origin defaults to 50% 50%.
+  el.style.transform = sh.rotation ? 'rotate(' + sh.rotation + 'deg)' : '';
 
   const isSel = state.selection && state.selection.kind === 'shape' && state.selection.id === sh.id;
   el.classList.toggle('selected', !!isSel);
@@ -1710,7 +1810,7 @@ function applyShapeVisual(sh) {
 }
 
 function rebuildSelectionAccessories(el, sh, isSel) {
-  el.querySelectorAll('.handle, .edge, .del-shape, .edit-shape').forEach(n => n.remove());
+  el.querySelectorAll('.handle, .edge, .del-shape, .edit-shape, .rotate-handle').forEach(n => n.remove());
   if (!isSel) return;
 
   const directEdit = DIRECT_EDIT_TYPES.includes(sh.type);
@@ -1759,6 +1859,15 @@ function rebuildSelectionAccessories(el, sh, isSel) {
       el.appendChild(s);
     }
   }
+
+  // Rotation handle above the shape, connected by a short line. Drag to spin.
+  const rot = document.createElement('div');
+  rot.className = 'rotate-handle';
+  rot.title = 'Rotate';
+  rot.textContent = '↻';
+  rot.addEventListener('mousedown', (ev) => startRotate('shape', sh.id, ev));
+  rot.addEventListener('touchstart', (ev) => startRotate('shape', sh.id, ev), { passive: false });
+  el.appendChild(rot);
 
   // Centered Edit button — the only in-shape control that opens the info panel.
   // Shown for every selected shape (tap it, or double-tap the shape, to edit).
@@ -1834,6 +1943,7 @@ function duplicateShape(id) {
     h: sh.h,
     name: sh.name,
     color: sh.color,
+    rotation: sh.rotation || 0,
     measurements: cloneMeasurements(sh.measurements),
   };
   state.shapes.push(dup);
@@ -1860,6 +1970,7 @@ function duplicateArrow(id) {
     y2: a.y2 + dy,
     color: a.color,
     distance: a.distance || '',
+    rotation: a.rotation || 0,
     measurements: cloneMeasurements(a.measurements),
   };
   state.arrows.push(dup);
@@ -1921,6 +2032,14 @@ function beginItemPointer(kind, id, e, applyDrag) {
   const sx = sp.clientX, sy = sp.clientY;
   let moved = false;
   closeMeasurePopup();
+  const detach = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    window.removeEventListener('touchmove', move);
+    window.removeEventListener('touchend', up);
+    window.removeEventListener('touchcancel', up);
+    activeDrag = null;
+  };
   const move = (ev) => {
     const p = evtPoint(ev);
     const dxs = p.clientX - sx, dys = p.clientY - sy;
@@ -1932,14 +2051,13 @@ function beginItemPointer(kind, id, e, applyDrag) {
     }
   };
   const up = () => {
-    window.removeEventListener('mousemove', move);
-    window.removeEventListener('mouseup', up);
-    window.removeEventListener('touchmove', move);
-    window.removeEventListener('touchend', up);
-    window.removeEventListener('touchcancel', up);
+    detach();
     if (moved) persistCanvas();   // drag → just persist the new position
     else handleItemTap(kind, id); // clean tap → select / edit
   };
+  // A second finger (two-finger pan/zoom) cancels this drag and reverts any
+  // partial move, so single-finger dragging never conflicts with the gesture.
+  activeDrag = () => { detach(); applyDrag(0, 0); };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
   window.addEventListener('touchmove', move, { passive: false });
@@ -1996,11 +2114,52 @@ function startResize(sh, dir, e) {
   });
 }
 
+// Drag a rotate handle to spin the selected item to any angle. Works for shapes
+// (CSS rotate about center) and arrows/fences (rotate the SVG about its midpoint).
+// Persists on release (attachDragListeners) so the angle survives a reload.
+function startRotate(kind, id, e) {
+  if (e.type === 'mousedown' && e.button !== 0) return;
+  if (e.type === 'touchstart') e.preventDefault();
+  e.stopPropagation();
+  closeMeasurePopup();
+  // Pivot (visual center) in screen coordinates.
+  let cx, cy;
+  if (kind === 'shape') {
+    const el = shapeEls.get(id);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    cx = r.left + r.width / 2; cy = r.top + r.height / 2;
+  } else {
+    const ent = kind === 'arrow' ? state.arrows.find(x => x.id === id)
+                                 : state.fences.find(x => x.id === id);
+    if (!ent) return;
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = (ent.x1 + ent.x2) / 2, my = (ent.y1 + ent.y2) / 2;
+    cx = rect.left + panX + mx * zoom;
+    cy = rect.top + panY + my * zoom;
+  }
+  attachDragListeners((ev) => {
+    const p = evtPoint(ev);
+    // Handle sits "up" from the pivot, so add 90° to point it at the cursor.
+    let deg = Math.atan2(p.clientY - cy, p.clientX - cx) * 180 / Math.PI + 90;
+    deg = Math.round(((deg % 360) + 360) % 360);
+    const ent = kind === 'shape' ? state.shapes.find(s => s.id === id)
+              : kind === 'arrow' ? state.arrows.find(a => a.id === id)
+              : state.fences.find(f => f.id === id);
+    if (!ent) return;
+    ent.rotation = deg;
+    if (kind === 'shape') applyShapeVisual(ent);
+    else renderOverlay();
+    if (state.panelOpen) positionPanel();
+  });
+}
+
 // ============= ARROWS / ROADS =============
 
 function addArrow(a) {
   if (typeof a.layer !== 'number') a.layer = LAYER_DEFAULTS.arrow;
   if (typeof a.seq !== 'number') a.seq = nextSeq();
+  if (typeof a.rotation !== 'number') a.rotation = 0;
   state.arrows.push(a); renderOverlay(); updatePlaceholder();
 }
 function deleteArrow(id) {
@@ -2013,6 +2172,7 @@ function deleteArrow(id) {
 function addFence(f) {
   if (typeof f.layer !== 'number') f.layer = LAYER_DEFAULTS.fence;
   if (typeof f.seq !== 'number') f.seq = nextSeq();
+  if (typeof f.rotation !== 'number') f.rotation = 0;
   state.fences.push(f); renderOverlay(); updatePlaceholder();
 }
 function deleteFence(id) {
@@ -2055,6 +2215,36 @@ function makeSvgEditButton(cx, cy) {
   g.addEventListener('touchstart', (e) => { e.stopPropagation(); e.preventDefault(); }, { passive: false });
   g.addEventListener('click', open);
   g.addEventListener('touchend', open);
+  return g;
+}
+
+// Rotate handle drawn above the midpoint of a selected arrow / fence: a short
+// connector line up to a circular-arrow button. Dragging it spins the item.
+function makeRotateHandleSvg(kind, id, cx, cy) {
+  const dist = 36, hx = cx, hy = cy - dist;
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.classList.add('rotate-handle-svg');
+  g.style.cursor = 'grab';
+  const ln = document.createElementNS(SVG_NS, 'line');
+  ln.setAttribute('x1', cx); ln.setAttribute('y1', cy);
+  ln.setAttribute('x2', hx); ln.setAttribute('y2', hy);
+  ln.setAttribute('stroke', '#3b82f6'); ln.setAttribute('stroke-width', '2');
+  ln.style.pointerEvents = 'none';
+  g.appendChild(ln);
+  const c = document.createElementNS(SVG_NS, 'circle');
+  c.setAttribute('cx', hx); c.setAttribute('cy', hy); c.setAttribute('r', 12);
+  c.setAttribute('fill', '#3b82f6'); c.setAttribute('stroke', '#ffffff'); c.setAttribute('stroke-width', '2');
+  g.appendChild(c);
+  const t = document.createElementNS(SVG_NS, 'text');
+  t.setAttribute('x', hx); t.setAttribute('y', hy + 1);
+  t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'middle');
+  t.setAttribute('fill', '#ffffff'); t.setAttribute('font-size', '16'); t.setAttribute('font-weight', '700');
+  t.style.pointerEvents = 'none';
+  t.textContent = '↻';
+  g.appendChild(t);
+  const start = (ev) => startRotate(kind, id, ev);
+  g.addEventListener('mousedown', start);
+  g.addEventListener('touchstart', start, { passive: false });
   return g;
 }
 
@@ -2191,8 +2381,17 @@ function renderOverlay() {
       }
     }
 
-    // Centered Edit button when the fence is selected (opens the info panel).
-    if (isSel) g.appendChild(makeSvgEditButton((f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
+    // Rotate handle + centered Edit button when the fence is selected.
+    if (isSel) {
+      g.appendChild(makeRotateHandleSvg('fence', f.id, (f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
+      g.appendChild(makeSvgEditButton((f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
+    }
+    // Apply the saved rotation about the line's midpoint (handle + content spin together).
+    if (f.rotation) {
+      const mx = (f.x1 + f.x2) / 2, my = (f.y1 + f.y2) / 2;
+      g.style.transformOrigin = mx + 'px ' + my + 'px';
+      g.style.transform = 'rotate(' + f.rotation + 'deg)';
+    }
 
     zoomLayerEl.appendChild(g);
   }
@@ -2344,8 +2543,17 @@ function renderOverlay() {
       }
     }
 
-    // Centered Edit button when the arrow is selected (opens the info panel).
-    if (isSel) g.appendChild(makeSvgEditButton((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
+    // Rotate handle + centered Edit button when the arrow is selected.
+    if (isSel) {
+      g.appendChild(makeRotateHandleSvg('arrow', a.id, (a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
+      g.appendChild(makeSvgEditButton((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
+    }
+    // Apply the saved rotation about the line's midpoint (handle + content spin together).
+    if (a.rotation) {
+      const mx = (a.x1 + a.x2) / 2, my = (a.y1 + a.y2) / 2;
+      g.style.transformOrigin = mx + 'px ' + my + 'px';
+      g.style.transform = 'rotate(' + a.rotation + 'deg)';
+    }
 
     zoomLayerEl.appendChild(g);
   }
@@ -3121,6 +3329,9 @@ function init() {
   }
   canvasEl.addEventListener('mousedown', onCanvasDown);
   canvasEl.addEventListener('touchstart', onCanvasDown, { passive: false });
+  // Two-finger pan + pinch zoom — capture phase so it pre-empts the single-finger
+  // shape-drag / canvas handlers the moment a second finger lands.
+  canvasEl.addEventListener('touchstart', onGestureStart, { capture: true, passive: false });
 
   function onCanvasMove(e) {
     if (!state.drawing || state.drawing.type === 'fence') return;
@@ -3278,6 +3489,7 @@ function init() {
       savePdfBtn.innerHTML = 'Saving…';
 
       const pdfPrevZoom = zoom;
+      const pdfPrevPanX = panX, pdfPrevPanY = panY;
       const zoomControlsEl = document.querySelector('.zoom-controls');
 
       try {
@@ -3285,9 +3497,9 @@ function init() {
         // don't get baked into the export.
         deselect();
         closeMeasurePopup();
-        // Always capture at 100% zoom (so the full plan fits) and hide the zoom
-        // buttons so they aren't baked into the PDF. Both are restored in finally.
-        zoomLayerEl.style.transform = 'scale(1)';
+        // Always capture at 100% zoom with no pan (so the full plan fits) and hide
+        // the zoom buttons so they aren't baked into the PDF. Restored in finally.
+        zoomLayerEl.style.transform = 'translate(0px,0px) scale(1)';
         if (zoomControlsEl) zoomControlsEl.style.visibility = 'hidden';
         // Yield one frame so the DOM updates land before we capture.
         await new Promise(r => requestAnimationFrame(r));
@@ -3374,8 +3586,9 @@ function init() {
         console.error('PDF export failed:', err);
         alert('PDF export failed: ' + (err && err.message ? err.message : err));
       } finally {
-        // Restore the user's zoom level and the zoom buttons.
+        // Restore the user's zoom level, pan, and the zoom buttons.
         zoom = pdfPrevZoom;
+        panX = pdfPrevPanX; panY = pdfPrevPanY;
         applyZoom();
         if (zoomControlsEl) zoomControlsEl.style.visibility = '';
         savePdfBtn.disabled = false;
