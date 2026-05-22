@@ -580,7 +580,7 @@ svg.prev { width: 28px; height: 24px; }
   background: #3b82f6;
 }
 /* SVG rotate handle for selected arrows / fences (.ov-item disables pointer events) */
-.rotate-handle-svg { pointer-events: auto; }
+.rotate-handle-svg { pointer-events: auto; touch-action: none; }
 .canvas.tool-active .rotate-handle-svg { pointer-events: none; }
 
 /* Draggable endpoint handles for selected arrows / fences */
@@ -1237,7 +1237,7 @@ const shapeEls = new Map();
 // ============= TYPE GROUPS =============
 
 // Shape types whose panels are always directly editable (no Edit/Save toggle)
-const DIRECT_EDIT_TYPES = ['road', 'driveway', 'tree', 'bush', 'septic', 'wellhead'];
+const DIRECT_EDIT_TYPES = ['road', 'driveway', 'tree', 'bush', 'septic', 'wellhead', 'room'];
 // Shape types that support edge measurements
 const MEASURABLE_SHAPE_TYPES = ['square', 'rectangle', 'circle', 'triangle', 'septic', 'wellhead'];
 // Shape types that get an opacity slider
@@ -1256,6 +1256,7 @@ const LAYER_DEFAULTS = {
   circle: 5, triangle: 5,  // smaller shapes
   tree: 6, bush: 6,
   septic: 7, wellhead: 7,  // top
+  room: 8,                 // interior rooms sit above their parent shape
 };
 const LAYER_MIN = 0, LAYER_MAX = 99;
 let zSeq = 0;
@@ -1579,6 +1580,7 @@ function applyCanvasData(data) {
     color: sh.color || '',
     opacity: (typeof sh.opacity === 'number') ? sh.opacity : 1,
     rotation: (typeof sh.rotation === 'number') ? sh.rotation : 0,
+    parentId: sh.parentId || null,   // interior rooms reference their parent shape
     layer: (typeof sh.layer === 'number') ? sh.layer : (LAYER_DEFAULTS[sh.type] || 4),
     seq: (typeof sh.seq === 'number') ? sh.seq : nextSeq(),
     measurements: cloneMeasurements(sh.measurements),
@@ -1888,6 +1890,48 @@ function addShape(type, x, y, w, h) {
   return sh;
 }
 
+// Add an interior room inside a square/rectangle parent. `shape` is 'square' or
+// 'rectangle' and just sets the room's starting dimensions.
+function addRoom(parentId, shape) {
+  const parent = state.shapes.find(s => s.id === parentId);
+  if (!parent) return;
+  const dw = shape === 'square' ? 100 : 140;
+  const dh = shape === 'square' ? 100 : 90;
+  const w = Math.min(dw, parent.w);
+  const h = Math.min(dh, parent.h);
+  // Place near the parent's top-left, nudged so successive rooms don't stack.
+  const off = (state.shapes.filter(s => s.parentId === parentId).length % 5) * 14;
+  let x = parent.x + 12 + off, y = parent.y + 12 + off;
+  x = Math.max(parent.x, Math.min(parent.x + parent.w - w, x));
+  y = Math.max(parent.y, Math.min(parent.y + parent.h - h, y));
+  const room = {
+    id: uid(), type: 'room', parentId,
+    x, y, w, h,
+    name: '', color: '', opacity: 1, rotation: 0,
+    layer: LAYER_DEFAULTS.room, seq: nextSeq(),
+    measurements: emptyMeasurements(),
+  };
+  state.shapes.push(room);
+  state.zOrder.push(room.id);
+  createShapeEl(room);
+  updatePlaceholder();
+  selectEntity('shape', room.id);
+  openPanel();
+  persistCanvas();
+}
+
+// Keep a parent's rooms inside its bounds (after the parent is resized/changed).
+function clampRoomsToParent(parent) {
+  for (const r of state.shapes) {
+    if (r.parentId !== parent.id) continue;
+    r.w = Math.min(r.w, parent.w);
+    r.h = Math.min(r.h, parent.h);
+    r.x = Math.max(parent.x, Math.min(parent.x + parent.w - r.w, r.x));
+    r.y = Math.max(parent.y, Math.min(parent.y + parent.h - r.h, r.y));
+    applyShapeVisual(r);
+  }
+}
+
 function createShapeEl(sh) {
   const el = document.createElement('div');
   el.className = 'shape ' + sh.type;
@@ -1931,11 +1975,31 @@ function createShapeEl(sh) {
     if (!isSelected('shape', sh.id)) selectEntity('shape', sh.id);
     const ox = sh.x, oy = sh.y;
     beginItemPointer('shape', sh.id, e, (ddx, ddy) => {
-      const cs = canvasSize();
-      sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + ddx));
-      sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + ddy));
+      const px0 = sh.x, py0 = sh.y;
+      const parent = sh.type === 'room' ? state.shapes.find(s => s.id === sh.parentId) : null;
+      if (parent) {
+        // Rooms stay inside their parent.
+        sh.x = Math.max(parent.x, Math.min(parent.x + parent.w - sh.w, ox + ddx));
+        sh.y = Math.max(parent.y, Math.min(parent.y + parent.h - sh.h, oy + ddy));
+      } else {
+        const cs = canvasSize();
+        sh.x = Math.max(0, Math.min(cs.w - sh.w, ox + ddx));
+        sh.y = Math.max(0, Math.min(cs.h - sh.h, oy + ddy));
+      }
       const el = shapeEls.get(sh.id);
       if (el) { el.style.left = sh.x + 'px'; el.style.top = sh.y + 'px'; }
+      // A parent shape carries its interior rooms along as it moves.
+      if (sh.type !== 'room') {
+        const mdx = sh.x - px0, mdy = sh.y - py0;
+        if (mdx || mdy) {
+          for (const r of state.shapes) {
+            if (r.parentId !== sh.id) continue;
+            r.x += mdx; r.y += mdy;
+            const rel = shapeEls.get(r.id);
+            if (rel) { rel.style.left = r.x + 'px'; rel.style.top = r.y + 'px'; }
+          }
+        }
+      }
     });
   };
   el.addEventListener('mousedown', onShapeStart);
@@ -1949,6 +2013,7 @@ function createShapeEl(sh) {
 // The label shown inside a shape. Road/driveway show the user's typed name (or
 // the default label when blank); the other fixed-label types ignore name.
 function displayNameFor(sh) {
+  if (sh.type === 'room') return sh.name || 'Room';
   if (sh.type === 'road') return sh.name || 'Road';
   if (sh.type === 'driveway') return sh.name || 'Driveway';
   if (sh.type === 'tree') return 'Tree';
@@ -2004,6 +2069,11 @@ function applyShapeVisual(sh) {
       body.setAttribute('fill', fill);
       body.setAttribute('stroke', stroke);
     }
+  } else if (sh.type === 'room') {
+    // Interior room — light translucent fill so the parent shows through, with a
+    // clear border. (Selection turns the border blue.)
+    el.style.background = 'rgba(59, 130, 246, 0.12)';
+    el.style.borderColor = isSel ? '#2563eb' : '#1e293b';
   } else {
     // square, rectangle, circle, road, driveway, septic — plain div
     el.style.background = fill;
@@ -2012,7 +2082,7 @@ function applyShapeVisual(sh) {
 
   const nameEl = el.querySelector('.shape-name');
   nameEl.textContent = displayNameFor(sh);
-  nameEl.style.color = textColorOn(fill);
+  nameEl.style.color = sh.type === 'room' ? '#1e293b' : textColorOn(fill);
 
   rebuildSelectionAccessories(el, sh, !!isSel);
   rebuildMeasurementLabels(el, sh);
@@ -2070,13 +2140,15 @@ function rebuildSelectionAccessories(el, sh, isSel) {
   }
 
   // Rotation handle above the shape, connected by a short line. Drag to spin.
-  const rot = document.createElement('div');
-  rot.className = 'rotate-handle';
-  rot.title = 'Rotate';
-  rot.textContent = '↻';
-  rot.addEventListener('mousedown', (ev) => startRotate('shape', sh.id, ev));
-  rot.addEventListener('touchstart', (ev) => startRotate('shape', sh.id, ev), { passive: false });
-  el.appendChild(rot);
+  // (Rooms stay axis-aligned to their parent, so they get no rotate handle.)
+  if (sh.type !== 'room') {
+    const rot = document.createElement('div');
+    rot.className = 'rotate-handle';
+    rot.title = 'Rotate';
+    rot.textContent = '↻';
+    wireHandlePointer(rot, (ev) => { if (!gesture) startRotate('shape', sh.id, ev); });
+    el.appendChild(rot);
+  }
 
   // Centered Edit button — the only in-shape control that opens the info panel.
   // Shown for every selected shape (tap it, or double-tap the shape, to edit).
@@ -2127,12 +2199,17 @@ function rebuildMeasurementLabels(el, sh) {
 }
 
 function deleteShape(id) {
-  state.shapes = state.shapes.filter(s => s.id !== id);
-  state.zOrder = state.zOrder.filter(z => z !== id);
-  const el = shapeEls.get(id);
-  if (el) el.remove();
-  shapeEls.delete(id);
-  if (state.selection && state.selection.kind === 'shape' && state.selection.id === id) deselect();
+  // Deleting a parent shape also removes any interior rooms it contains.
+  const removeIds = new Set([id]);
+  for (const s of state.shapes) if (s.parentId === id) removeIds.add(s.id);
+  for (const rid of removeIds) {
+    const el = shapeEls.get(rid);
+    if (el) el.remove();
+    shapeEls.delete(rid);
+  }
+  state.shapes = state.shapes.filter(s => !removeIds.has(s.id));
+  state.zOrder = state.zOrder.filter(z => !removeIds.has(z));
+  if (state.selection && state.selection.kind === 'shape' && removeIds.has(state.selection.id)) deselect();
   updatePlaceholder();
 }
 
@@ -2293,19 +2370,25 @@ function startResize(sh, dir, e) {
   const sx = sp.clientX, sy = sp.clientY;
   const ox = sh.x, oy = sh.y, ow = sh.w, oh = sh.h;
   closeMeasurePopup();
+  // Rooms are bounded by their parent; everything else by the working area.
+  const parent = sh.type === 'room' ? state.shapes.find(s => s.id === sh.parentId) : null;
   attachDragListeners((ev) => {
     const p = evtPoint(ev);
     const cs = canvasSize();
+    const bMinX = parent ? parent.x : 0;
+    const bMinY = parent ? parent.y : 0;
+    const bMaxX = parent ? parent.x + parent.w : cs.w;
+    const bMaxY = parent ? parent.y + parent.h : cs.h;
     const dx = (p.clientX - sx) / zoom, dy = (p.clientY - sy) / zoom;
     let nx = ox, ny = oy, nw = ow, nh = oh;
     if (dir.includes('e')) nw = Math.max(MIN_SIZE, ow + dx);
     if (dir.includes('w')) { nw = Math.max(MIN_SIZE, ow - dx); nx = ox + (ow - nw); }
     if (dir.includes('s')) nh = Math.max(MIN_SIZE, oh + dy);
     if (dir.includes('n')) { nh = Math.max(MIN_SIZE, oh - dy); ny = oy + (oh - nh); }
-    nx = Math.max(0, nx);
-    ny = Math.max(0, ny);
-    nw = Math.max(MIN_SIZE, Math.min(nw, cs.w - nx));
-    nh = Math.max(MIN_SIZE, Math.min(nh, cs.h - ny));
+    nx = Math.max(bMinX, nx);
+    ny = Math.max(bMinY, ny);
+    nw = Math.max(MIN_SIZE, Math.min(nw, bMaxX - nx));
+    nh = Math.max(MIN_SIZE, Math.min(nh, bMaxY - ny));
     sh.x = nx; sh.y = ny; sh.w = nw; sh.h = nh;
     const el = shapeEls.get(sh.id);
     if (el) {
@@ -2314,6 +2397,8 @@ function startResize(sh, dir, e) {
       el.style.width = nw + 'px';
       el.style.height = nh + 'px';
     }
+    // Resizing a parent keeps its interior rooms within the new bounds.
+    if (sh.type !== 'room') clampRoomsToParent(sh);
     // Live-update the panel's Width/Height (feet) fields as the user drags.
     const wIn = entityPopup.querySelector('input[data-role="width-ft"]');
     const hIn = entityPopup.querySelector('input[data-role="height-ft"]');
@@ -2323,15 +2408,16 @@ function startResize(sh, dir, e) {
   });
 }
 
-// Drag a rotate handle to spin the selected item to any angle. Works for shapes
-// (CSS rotate about center) and arrows/fences (rotate the SVG about its midpoint).
-// Persists on release (attachDragListeners) so the angle survives a reload.
+// Drag a rotate handle to spin the selected item to any angle. Uses Pointer
+// Events with pointer capture on the (stable) canvas, so a single finger / the
+// mouse drives the rotation CONTINUOUSLY without stopping even though the handle
+// is recreated each frame (this is the mobile "rotation stops mid-drag" fix).
 function startRotate(kind, id, e) {
-  if (e.type === 'mousedown' && e.button !== 0) return;
-  if (e.type === 'touchstart') e.preventDefault();
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();   // stop the canvas interfering immediately
   e.stopPropagation();
   closeMeasurePopup();
-  // Pivot (visual center) in screen coordinates.
+  // Pivot (visual center) in screen coordinates — fixed for the whole drag.
   let cx, cy;
   if (kind === 'shape') {
     const el = shapeEls.get(id);
@@ -2339,18 +2425,21 @@ function startRotate(kind, id, e) {
     const r = el.getBoundingClientRect();
     cx = r.left + r.width / 2; cy = r.top + r.height / 2;
   } else {
-    const ent = kind === 'arrow' ? state.arrows.find(x => x.id === id)
-                                 : state.fences.find(x => x.id === id);
-    if (!ent) return;
+    const ent0 = kind === 'arrow' ? state.arrows.find(x => x.id === id)
+                                  : state.fences.find(x => x.id === id);
+    if (!ent0) return;
     const rect = canvasEl.getBoundingClientRect();
-    const mx = (ent.x1 + ent.x2) / 2, my = (ent.y1 + ent.y2) / 2;
+    const mx = (ent0.x1 + ent0.x2) / 2, my = (ent0.y1 + ent0.y2) / 2;
     cx = rect.left + panX + mx * zoom;
     cy = rect.top + panY + my * zoom;
   }
-  attachDragListeners((ev) => {
-    const p = evtPoint(ev);
-    // Handle sits "up" from the pivot, so add 90° to point it at the cursor.
-    let deg = Math.atan2(p.clientY - cy, p.clientX - cx) * 180 / Math.PI + 90;
+  const pid = e.pointerId;
+  try { canvasEl.setPointerCapture(pid); } catch (_) {}
+  const move = (ev) => {
+    if (ev.pointerId !== pid) return; // only the touch that started on the handle
+    ev.preventDefault();
+    // Angle from the item center to the current pointer (handle sits "up", +90).
+    let deg = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
     deg = Math.round(((deg % 360) + 360) % 360);
     const ent = kind === 'shape' ? state.shapes.find(s => s.id === id)
               : kind === 'arrow' ? state.arrows.find(a => a.id === id)
@@ -2360,7 +2449,20 @@ function startRotate(kind, id, e) {
     if (kind === 'shape') applyShapeVisual(ent);
     else renderOverlay();
     if (state.panelOpen) positionPanel();
-  });
+  };
+  const finish = () => {
+    canvasEl.removeEventListener('pointermove', move);
+    canvasEl.removeEventListener('pointerup', onUp);
+    canvasEl.removeEventListener('pointercancel', onUp);
+    try { canvasEl.releasePointerCapture(pid); } catch (_) {}
+    activeDrag = null;
+    persistCanvas();
+  };
+  const onUp = (ev) => { if (ev.pointerId !== pid) return; finish(); };
+  activeDrag = finish;
+  canvasEl.addEventListener('pointermove', move);
+  canvasEl.addEventListener('pointerup', onUp);
+  canvasEl.addEventListener('pointercancel', onUp);
 }
 
 // Fold an arrow/fence's rotation into its endpoint coordinates and reset rotation
@@ -2466,6 +2568,15 @@ function startLineMove(kind, ent, e) {
   canvasEl.addEventListener('pointercancel', onUp);
 }
 
+// Wire a handle's pointerdown to start a drag, AND swallow the legacy mouse/touch
+// events so they don't bubble to the canvas (deselect/pan) or the parent shape
+// (move). Pointer events drive the interaction; the legacy events are blocked.
+function wireHandlePointer(el, startFn) {
+  el.addEventListener('pointerdown', startFn);
+  el.addEventListener('mousedown', (e) => e.stopPropagation());
+  el.addEventListener('touchstart', (e) => { e.stopPropagation(); if (e.cancelable) e.preventDefault(); }, { passive: false });
+}
+
 // A draggable endpoint handle (circle) for a selected arrow / fence. Sized in
 // screen pixels (counter-scaled against zoom) so it stays >=20px and grabbable.
 function makeEndpointHandleSvg(kind, id, which, x, y) {
@@ -2478,8 +2589,7 @@ function makeEndpointHandleSvg(kind, id, which, x, y) {
   c.setAttribute('cy', y);
   c.setAttribute('r', 12 / zoom);                 // ~24px diameter on screen
   c.setAttribute('stroke-width', 3 / zoom);
-  const start = (ev) => { if (!gesture) startEndpointDrag(kind, id, which, ev); };
-  c.addEventListener('pointerdown', start);
+  wireHandlePointer(c, (ev) => { if (!gesture) startEndpointDrag(kind, id, which, ev); });
   return c;
 }
 
@@ -2586,9 +2696,7 @@ function makeRotateHandleSvg(kind, id, cx, cy) {
   t.style.pointerEvents = 'none';
   t.textContent = '↻';
   g.appendChild(t);
-  const start = (ev) => startRotate(kind, id, ev);
-  g.addEventListener('mousedown', start);
-  g.addEventListener('touchstart', start, { passive: false });
+  wireHandlePointer(g, (ev) => { if (!gesture) startRotate(kind, id, ev); });
   return g;
 }
 
@@ -2644,7 +2752,7 @@ function renderOverlay() {
       if (which) { startEndpointDrag('fence', f.id, which, e); return; }
       startLineMove('fence', f, e);
     };
-    hit.addEventListener('pointerdown', onFenceStart);
+    wireHandlePointer(hit, onFenceStart);
     g.appendChild(hit);
 
     // Auto "Fence" label, just above the midpoint of the line
@@ -2801,7 +2909,7 @@ function renderOverlay() {
       if (which) { startEndpointDrag('arrow', a.id, which, e); return; }
       startLineMove('arrow', a, e);
     };
-    hit.addEventListener('pointerdown', onArrowStart);
+    wireHandlePointer(hit, onArrowStart);
     g.appendChild(hit);
 
     // Distance label centered at the arrow midpoint
@@ -3035,6 +3143,17 @@ function renderPanel() {
           '<button class="danger" data-role="delete" type="button">Delete</button>' +
           '<button class="primary" data-role="save" type="button">Save</button>' +
         '</div>';
+    } else if (sh.type === 'room') {
+      // Interior room — name + size + delete (always editable).
+      html =
+        '<div class="entity-label">Room</div>' +
+        '<div class="title">Name</div>' +
+        '<input type="text" data-role="name" value="' + escHtml(sh.name) + '" placeholder="Room (e.g. Kitchen)" autocomplete="off">' +
+        sizeBlockHtml(sh) +
+        '<div class="row">' +
+          '<button class="danger" data-role="delete" type="button">Delete</button>' +
+          '<button class="primary" data-role="save" type="button">Save</button>' +
+        '</div>';
     } else if (sh.type === 'tree' || sh.type === 'bush') {
       // Tree / Bush — minimal panel: size + a Delete button.
       // The 8 resize handles are always on (rendered by rebuildSelectionAccessories).
@@ -3060,7 +3179,9 @@ function renderPanel() {
           '<button class="primary" data-role="save" type="button">Save</button>' +
         '</div>';
     } else {
-      // Regular shapes (square/rectangle/circle/triangle) — name + size + measurements
+      // Regular shapes (square/rectangle/circle/triangle) — name + size + measurements.
+      // Squares & rectangles can also hold interior rooms.
+      const roomParent = sh.type === 'square' || sh.type === 'rectangle';
       html =
         '<div class="title">Name</div>' +
         '<input type="text" data-role="name" value="' + escHtml(sh.name) + '" placeholder="Untitled" autocomplete="off">' +
@@ -3068,6 +3189,13 @@ function renderPanel() {
         '<div class="title" style="margin-top:12px;">Color</div>' + swatches +
         sizeBlockHtml(sh) +
         measurementsBlockHtml(sh.measurements) +
+        (roomParent
+          ? '<div class="title" style="margin-top:12px;">Add Room</div>' +
+            '<div class="row">' +
+              '<button data-role="add-room-square" type="button">Square Room</button>' +
+              '<button data-role="add-room-rect" type="button">Rectangle Room</button>' +
+            '</div>'
+          : '') +
         '<div class="row">' +
           '<button data-role="duplicate" type="button">Duplicate</button>' +
         '</div>' +
@@ -3235,6 +3363,12 @@ function wirePanel() {
     });
   }
 
+  // Add Room — place an interior room inside this square/rectangle.
+  const addRoomSq = entityPopup.querySelector('button[data-role="add-room-square"]');
+  if (addRoomSq) addRoomSq.addEventListener('click', () => addRoom(sel.id, 'square'));
+  const addRoomRect = entityPopup.querySelector('button[data-role="add-room-rect"]');
+  if (addRoomRect) addRoomRect.addEventListener('click', () => addRoom(sel.id, 'rectangle'));
+
   // Save — persists the entire canvas state and closes the panel
   const saveBtn = entityPopup.querySelector('button[data-role="save"]');
   if (saveBtn) {
@@ -3304,10 +3438,14 @@ function wirePanel() {
     let px = feetToPx(valFt);
     if (!isFinite(px) || px <= 0) return;
     px = Math.max(MIN_SIZE, px);
-    const cs = canvasSize();
-    if (which === 'w') sh.w = Math.min(px, cs.w - sh.x);
-    else sh.h = Math.min(px, cs.h - sh.y);
+    // Rooms are capped by their parent; other shapes by the working area.
+    const parent = sh.type === 'room' ? state.shapes.find(s => s.id === sh.parentId) : null;
+    const maxX = parent ? parent.x + parent.w : canvasSize().w;
+    const maxY = parent ? parent.y + parent.h : canvasSize().h;
+    if (which === 'w') sh.w = Math.min(px, maxX - sh.x);
+    else sh.h = Math.min(px, maxY - sh.y);
     applyShapeVisual(sh);
+    if (sh.type !== 'room') clampRoomsToParent(sh); // keep its rooms inside
     positionPanel();
   }
   if (widthInput) {
