@@ -866,6 +866,73 @@ svg.prev { width: 28px; height: 24px; }
   .notes-bar { padding: 6px 10px; padding-left: 64px; }
   .notes-bar-textarea { height: 32px; }
 }
+
+/* ----- Start New Blueprint (destructive action, bottom of the menu) ----- */
+.menu-danger {
+  margin-top: auto;            /* push to the very bottom of the sidebar */
+  padding-top: 14px;
+  border-top: 1px solid #1e293b;
+}
+.danger-tool {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  background: #dc2626;
+  color: #ffffff;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.danger-tool:hover { background: #b91c1c; }
+.danger-tool:active { background: #991b1b; }
+.danger-tool svg { flex-shrink: 0; }
+
+/* ----- Confirmation modal (Start New Blueprint warning) ----- */
+.modal-backdrop {
+  display: none;             /* shown as flex via JS */
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  z-index: 500;              /* above sidebar / drawers */
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-box {
+  background: #ffffff;
+  color: #1e293b;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 430px;
+  padding: 22px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.35);
+}
+.modal-box h3 { margin: 0 0 10px; font-size: 18px; color: #b91c1c; }
+.modal-box p { margin: 0 0 18px; font-size: 14px; line-height: 1.5; color: #334155; }
+.modal-actions { display: flex; flex-direction: column; gap: 8px; }
+.modal-actions button {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid #cbd5e1;
+  background: #f1f5f9;
+  color: #1e293b;
+}
+.modal-actions button:hover { background: #e2e8f0; }
+.modal-actions button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.modal-actions button.primary:hover { background: #1d4ed8; }
+.modal-actions button.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+.modal-actions button.danger:hover { background: #b91c1c; }
 </style>
 </head>
 <body>
@@ -961,6 +1028,14 @@ svg.prev { width: 28px; height: 24px; }
         </button>
       </div>
     </div>
+    <div class="menu-danger">
+      <button class="danger-tool" id="startNewBtn" type="button">
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+          <path d="M3 6h14M8 6V4h4v2M6 6l1 11h6l1-11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Start New Blueprint
+      </button>
+    </div>
   </aside>
 
   <div class="canvas" id="canvas">
@@ -1028,6 +1103,19 @@ svg.prev { width: 28px; height: 24px; }
   </div>
   <div class="drawer-list" id="blueprintsList"></div>
 </aside>
+
+<div class="modal-backdrop" id="newBlueprintModal">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="newBpTitle">
+    <h3 id="newBpTitle">Start a new blueprint?</h3>
+    <p>Your current blueprint has unsaved changes. Make sure to save and download
+       your work before starting a new one. Are you sure you want to clear the canvas?</p>
+    <div class="modal-actions">
+      <button class="primary" id="newBpSaveFirst" type="button">Save First</button>
+      <button class="danger" id="newBpStartFresh" type="button">Start Fresh</button>
+      <button id="newBpCancel" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
@@ -1368,6 +1456,19 @@ function clearCanvas() {
   renderOverlay();
 }
 
+// Start a brand-new, blank blueprint: clear all items AND notes, reset the view,
+// and persist the empty state so a reload stays blank.
+function startFreshCanvas() {
+  clearCanvas();
+  setTool(null);
+  const ta = document.getElementById('notesTextarea');
+  if (ta) ta.value = '';
+  try { localStorage.removeItem(NOTES_PERSIST_KEY); } catch (_) {}
+  zoom = 1; panX = 0; panY = 0; applyZoom();
+  persistCanvas();
+  updatePlaceholder();
+}
+
 // Rebuild the whole canvas from a data object (used by load + import + restore).
 function applyCanvasData(data) {
   if (!data || typeof data !== 'object') return;
@@ -1469,9 +1570,9 @@ function saveBlueprintList(list) {
 
 function saveBlueprint() {
   const name = window.prompt('Name this blueprint:', '');
-  if (name == null) return;            // cancelled
+  if (name == null) return false;            // cancelled
   const trimmed = name.trim();
-  if (!trimmed) { alert('Please enter a name.'); return; }
+  if (!trimmed) { alert('Please enter a name.'); return false; }
   const list = loadBlueprintList();
   list.push({
     id: uid(),
@@ -1481,8 +1582,10 @@ function saveBlueprint() {
   });
   if (saveBlueprintList(list)) {
     alert('Saved "' + trimmed + '".');
+    return true;
   } else {
     alert('Could not save — browser storage may be full.');
+    return false;
   }
 }
 
@@ -1501,13 +1604,22 @@ function loadBlueprintEntry(entry) {
 }
 
 function downloadBlueprint(entry) {
+  // Confirm / change the file name before downloading, pre-filled with the
+  // blueprint's saved name. Saves as a .json file with whatever they type.
+  const suggested = (entry.name || 'blueprint');
+  const input = window.prompt('Save blueprint as (file name):', suggested);
+  if (input == null) return; // cancelled
+  let fileName = input.trim().replace(/\.json$/i, '');
+  if (!fileName) fileName = suggested;
+  // Strip only characters that are illegal in file names; keep spaces etc.
+  const safe = fileName.replace(/[\/\\:*?"<>|]+/g, '_').trim() || 'blueprint';
   try {
     const json = JSON.stringify(entry, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (entry.name || 'blueprint').replace(/[^\w\-]+/g, '_') + '.json';
+    a.download = safe + '.json';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -3459,6 +3571,24 @@ function init() {
   if (saveBpBtn) saveBpBtn.addEventListener('click', saveBlueprint);
   const myBpBtn = document.getElementById('myBlueprintsBtn');
   if (myBpBtn) myBpBtn.addEventListener('click', openBlueprintsDrawer);
+
+  // Start New Blueprint — warning modal with Save First / Start Fresh / Cancel
+  const newModal = document.getElementById('newBlueprintModal');
+  const openNewModal = () => { if (newModal) newModal.style.display = 'flex'; };
+  const closeNewModal = () => { if (newModal) newModal.style.display = 'none'; };
+  const startNewBtn = document.getElementById('startNewBtn');
+  if (startNewBtn) startNewBtn.addEventListener('click', () => { closeSidebar(); openNewModal(); });
+  const newBpCancel = document.getElementById('newBpCancel');
+  if (newBpCancel) newBpCancel.addEventListener('click', closeNewModal);
+  if (newModal) newModal.addEventListener('click', (e) => { if (e.target === newModal) closeNewModal(); });
+  const newBpStartFresh = document.getElementById('newBpStartFresh');
+  if (newBpStartFresh) newBpStartFresh.addEventListener('click', () => { closeNewModal(); startFreshCanvas(); });
+  const newBpSaveFirst = document.getElementById('newBpSaveFirst');
+  if (newBpSaveFirst) newBpSaveFirst.addEventListener('click', () => {
+    closeNewModal();
+    // Open the Save flow; only clear if the save actually completed.
+    if (saveBlueprint()) startFreshCanvas();
+  });
   const bpClose = document.getElementById('blueprintsClose');
   if (bpClose) bpClose.addEventListener('click', closeBlueprintsDrawer);
   const bpBackdrop = document.getElementById('blueprintsBackdrop');
