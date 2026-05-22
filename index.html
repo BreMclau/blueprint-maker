@@ -583,6 +583,22 @@ svg.prev { width: 28px; height: 24px; }
 .rotate-handle-svg { pointer-events: auto; }
 .canvas.tool-active .rotate-handle-svg { pointer-events: none; }
 
+/* Draggable endpoint handles for selected arrows / fences */
+.endpoint-handle {
+  pointer-events: auto;
+  cursor: grab;
+  fill: #ffffff;
+  stroke: #3b82f6;
+}
+.endpoint-handle:hover,
+.endpoint-handle:active,
+.endpoint-handle.dragging {
+  fill: #3b82f6;     /* highlight on hover / touch / while dragging */
+  stroke: #1d4ed8;
+  cursor: grabbing;
+}
+.canvas.tool-active .endpoint-handle { pointer-events: none; }
+
 /* Edge strips for measurements */
 .edge { position: absolute; cursor: pointer; z-index: 3; }
 .edge:hover { background: rgba(96,165,250,0.3); }
@@ -1317,9 +1333,15 @@ function setZoom(z) {
   // Round to one decimal so repeated +/- steps stay clean (no float drift).
   zoom = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)) * 10) / 10;
   applyZoom();
+  refreshLineHandles();
 }
 function zoomIn() { setZoom(zoom + ZOOM_STEP); }
 function zoomOut() { setZoom(zoom - ZOOM_STEP); }
+// Endpoint/rotate handles on a selected arrow/fence are sized in screen px, so
+// re-render them after a zoom change to keep that constant size.
+function refreshLineHandles() {
+  if (state.selection && (state.selection.kind === 'arrow' || state.selection.kind === 'fence')) renderOverlay();
+}
 // Zoom level that fits the whole world on screen (used on first load).
 function fitZoom() {
   const r = canvasEl.getBoundingClientRect();
@@ -1382,6 +1404,7 @@ function onGestureEnd(e) {
   window.removeEventListener('touchmove', onGestureMove);
   window.removeEventListener('touchend', onGestureEnd);
   window.removeEventListener('touchcancel', onGestureEnd);
+  refreshLineHandles(); // restore endpoint-handle screen size after a pinch
 }
 
 // ----- Desktop pan: click-drag an empty canvas area to move the view -----
@@ -2331,6 +2354,83 @@ function startRotate(kind, id, e) {
   });
 }
 
+// Fold an arrow/fence's rotation into its endpoint coordinates and reset rotation
+// to 0 — keeps the visual identical but lets endpoints be dragged in plain
+// content space (no rotated-frame math).
+function bakeRotation(ent) {
+  if (!ent.rotation) return;
+  const mx = (ent.x1 + ent.x2) / 2, my = (ent.y1 + ent.y2) / 2;
+  const rad = ent.rotation * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  const rot = (x, y) => ({
+    x: mx + (x - mx) * cos - (y - my) * sin,
+    y: my + (x - mx) * sin + (y - my) * cos,
+  });
+  const p1 = rot(ent.x1, ent.y1), p2 = rot(ent.x2, ent.y2);
+  ent.x1 = p1.x; ent.y1 = p1.y; ent.x2 = p2.x; ent.y2 = p2.y;
+  ent.rotation = 0;
+}
+
+// Drag one endpoint of an arrow / fence: that end follows the pointer while the
+// other end stays fixed (adjusts length + direction). Works for mouse and touch.
+let draggingEndpoint = null; // { kind, id, which } while an endpoint is being dragged
+function startEndpointDrag(kind, id, which, e) {
+  if (e.type === 'mousedown' && e.button !== 0) return;
+  if (e.type === 'touchstart') e.preventDefault();
+  e.stopPropagation();
+  closeMeasurePopup();
+  const ent = kind === 'arrow' ? state.arrows.find(a => a.id === id)
+                               : state.fences.find(f => f.id === id);
+  if (!ent) return;
+  bakeRotation(ent);                 // drag in plain content space
+  draggingEndpoint = { kind, id, which };
+  renderOverlay();
+  const move = (ev) => {
+    if (ev.type === 'touchmove' && ev.cancelable) ev.preventDefault();
+    const p = canvasPoint(ev);
+    const cs = canvasSize();
+    const nx = Math.max(0, Math.min(cs.w, p.x));
+    const ny = Math.max(0, Math.min(cs.h, p.y));
+    if (which === 'start') { ent.x1 = nx; ent.y1 = ny; }
+    else { ent.x2 = nx; ent.y2 = ny; }
+    renderOverlay();
+    if (state.panelOpen) positionPanel();
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    window.removeEventListener('touchmove', move);
+    window.removeEventListener('touchend', up);
+    window.removeEventListener('touchcancel', up);
+    draggingEndpoint = null;
+    renderOverlay();
+    persistCanvas();
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  window.addEventListener('touchmove', move, { passive: false });
+  window.addEventListener('touchend', up);
+  window.addEventListener('touchcancel', up);
+}
+
+// A draggable endpoint handle (circle) for a selected arrow / fence. Sized in
+// screen pixels (counter-scaled against zoom) so it stays >=20px and grabbable.
+function makeEndpointHandleSvg(kind, id, which, x, y) {
+  const c = document.createElementNS(SVG_NS, 'circle');
+  c.classList.add('endpoint-handle');
+  if (draggingEndpoint && draggingEndpoint.kind === kind && draggingEndpoint.id === id && draggingEndpoint.which === which) {
+    c.classList.add('dragging');
+  }
+  c.setAttribute('cx', x);
+  c.setAttribute('cy', y);
+  c.setAttribute('r', 12 / zoom);                 // ~24px diameter on screen
+  c.setAttribute('stroke-width', 3 / zoom);
+  const start = (ev) => startEndpointDrag(kind, id, which, ev);
+  c.addEventListener('mousedown', start);
+  c.addEventListener('touchstart', start, { passive: false });
+  return c;
+}
+
 // ============= ARROWS / ROADS =============
 
 function addArrow(a) {
@@ -2558,10 +2658,12 @@ function renderOverlay() {
       }
     }
 
-    // Rotate handle + centered Edit button when the fence is selected.
+    // Rotate handle + Edit button + draggable endpoint handles when selected.
     if (isSel) {
       g.appendChild(makeRotateHandleSvg('fence', f.id, (f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
       g.appendChild(makeSvgEditButton((f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2));
+      g.appendChild(makeEndpointHandleSvg('fence', f.id, 'start', f.x1, f.y1));
+      g.appendChild(makeEndpointHandleSvg('fence', f.id, 'end', f.x2, f.y2));
     }
     // Apply the saved rotation about the line's midpoint (handle + content spin together).
     if (f.rotation) {
@@ -2720,10 +2822,12 @@ function renderOverlay() {
       }
     }
 
-    // Rotate handle + centered Edit button when the arrow is selected.
+    // Rotate handle + Edit button + draggable endpoint handles when selected.
     if (isSel) {
       g.appendChild(makeRotateHandleSvg('arrow', a.id, (a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
       g.appendChild(makeSvgEditButton((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2));
+      g.appendChild(makeEndpointHandleSvg('arrow', a.id, 'start', a.x1, a.y1));
+      g.appendChild(makeEndpointHandleSvg('arrow', a.id, 'end', a.x2, a.y2));
     }
     // Apply the saved rotation about the line's midpoint (handle + content spin together).
     if (a.rotation) {
