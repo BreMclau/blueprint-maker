@@ -1925,6 +1925,9 @@ function createShapeEl(sh) {
     if (e.type === 'mousedown' && e.button !== 0) return;
     if (e.type === 'touchstart') e.preventDefault();
     e.stopPropagation();
+    // Select immediately on press so the resize/rotate handles are live at once
+    // (no waiting for a release before a handle can be grabbed).
+    if (!isSelected('shape', sh.id)) selectEntity('shape', sh.id);
     const ox = sh.x, oy = sh.y;
     beginItemPointer('shape', sh.id, e, (ddx, ddy) => {
       const cs = canvasSize();
@@ -2431,6 +2434,21 @@ function makeEndpointHandleSvg(kind, id, which, x, y) {
   return c;
 }
 
+// True when a press lands on/near one of an arrow/fence's (visual) endpoints, so
+// the very first press can grab and drag that endpoint in a single gesture.
+function nearEndpoint(ent, e) {
+  const p = canvasPoint(e);
+  const mx = (ent.x1 + ent.x2) / 2, my = (ent.y1 + ent.y2) / 2;
+  const rad = (ent.rotation || 0) * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  const vis = (x, y) => ({ x: mx + (x - mx) * cos - (y - my) * sin, y: my + (x - mx) * sin + (y - my) * cos });
+  const v1 = vis(ent.x1, ent.y1), v2 = vis(ent.x2, ent.y2);
+  const grab = 18 / zoom; // forgiving grab radius in content units
+  if (Math.hypot(p.x - v1.x, p.y - v1.y) <= grab) return 'start';
+  if (Math.hypot(p.x - v2.x, p.y - v2.y) <= grab) return 'end';
+  return null;
+}
+
 // ============= ARROWS / ROADS =============
 
 function addArrow(a) {
@@ -2569,6 +2587,11 @@ function renderOverlay() {
       if (e.type === 'mousedown' && e.button !== 0) return;
       if (e.type === 'touchstart') e.preventDefault();
       e.stopPropagation();
+      // One press, no waiting: pressing an end grabs that endpoint; selection is
+      // immediate so every handle is live at once.
+      const which = nearEndpoint(f, e);
+      if (!isSelected('fence', f.id)) selectEntity('fence', f.id);
+      if (which) { startEndpointDrag('fence', f.id, which, e); return; }
       const ox1 = f.x1, oy1 = f.y1, ox2 = f.x2, oy2 = f.y2;
       beginItemPointer('fence', f.id, e, (ddx, ddy) => {
         f.x1 = ox1 + ddx; f.y1 = oy1 + ddy;
@@ -2726,6 +2749,11 @@ function renderOverlay() {
       if (e.type === 'mousedown' && e.button !== 0) return;
       if (e.type === 'touchstart') e.preventDefault();
       e.stopPropagation();
+      // One press, no waiting: pressing an end grabs that endpoint; selection is
+      // immediate so every handle is live at once.
+      const which = nearEndpoint(a, e);
+      if (!isSelected('arrow', a.id)) selectEntity('arrow', a.id);
+      if (which) { startEndpointDrag('arrow', a.id, which, e); return; }
       const ox1 = a.x1, oy1 = a.y1, ox2 = a.x2, oy2 = a.y2;
       beginItemPointer('arrow', a.id, e, (ddx, ddy) => {
         a.x1 = ox1 + ddx; a.y1 = oy1 + ddy;
