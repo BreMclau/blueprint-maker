@@ -314,18 +314,16 @@ svg.prev { width: 28px; height: 24px; }
   flex: 1;
   position: relative;
   overflow: hidden;
-  background-color: #f8fafc;
-  background-image:
-    linear-gradient(to right, rgba(148,163,184,0.25) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(148,163,184,0.25) 1px, transparent 1px),
-    linear-gradient(to right, rgba(71,85,105,0.4) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(71,85,105,0.4) 1px, transparent 1px);
-  background-size: 20px 20px, 20px 20px, 100px 100px, 100px 100px;
+  /* Neutral "dead space" outside the working area; the grid + border live on the
+     zoom layer (the actual working area). */
+  background-color: #cbd5e1;
+  cursor: grab; /* drag an empty area to pan (desktop) */
   /* Stop the browser from scrolling/zooming the page during canvas touch gestures */
   touch-action: none;
   /* Contain the canvas's own stacking (shapes, compass) so overlays sit above it */
   isolation: isolate;
 }
+.canvas.panning { cursor: grabbing; }
 .canvas.tool-active { cursor: crosshair; }
 .canvas.tool-active .shape,
 .canvas.tool-active .arrow-hit,
@@ -377,9 +375,18 @@ svg.prev { width: 28px; height: 24px; }
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
-  height: 100%;
+  /* width / height are set in JS to the world size (2x the visible viewport) */
   transform-origin: 0 0; /* anchor scaling at the top-left so positions stay relative */
+  background-color: #f8fafc;
+  background-image:
+    linear-gradient(to right, rgba(148,163,184,0.25) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148,163,184,0.25) 1px, transparent 1px),
+    linear-gradient(to right, rgba(71,85,105,0.4) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(71,85,105,0.4) 1px, transparent 1px);
+  background-size: 20px 20px, 20px 20px, 100px 100px, 100px 100px;
+  /* Thick working-area boundary. inset box-shadow doesn't shift child layout
+     (so coordinates stay exact) and scales with the zoom transform. */
+  box-shadow: inset 0 0 0 8px #1e293b;
 }
 .zoom-controls {
   position: absolute;
@@ -1276,9 +1283,32 @@ function changeLayer(delta) {
 // conversion (canvasPoint + drag/resize deltas) divides by `zoom`.
 const ZOOM_MIN = 0.5, ZOOM_MAX = 2, ZOOM_STEP = 0.1;
 let zoom = 1;
-let panX = 0, panY = 0; // view offset in screen px (two-finger pan)
+let panX = 0, panY = 0; // view offset in screen px (pan)
+
+// The working area ("world") is twice the visible viewport, so at 50% zoom it
+// fills the screen edge-to-edge and at 100% there is room to pan around.
+let WORLD_W = 0, WORLD_H = 0;
+function computeWorldSize() {
+  const r = canvasEl.getBoundingClientRect();
+  WORLD_W = Math.round(r.width * 2);
+  WORLD_H = Math.round(r.height * 2);
+}
+function applyWorldSize() {
+  zoomLayerEl.style.width = WORLD_W + 'px';
+  zoomLayerEl.style.height = WORLD_H + 'px';
+}
+// Keep the world covering the viewport: never reveal dead space, and let the
+// user pan to every part of the working area.
+function clampPan() {
+  if (!WORLD_W) return;
+  const r = canvasEl.getBoundingClientRect();
+  const wpx = WORLD_W * zoom, hpx = WORLD_H * zoom;
+  panX = wpx <= r.width ? (r.width - wpx) / 2 : Math.min(0, Math.max(r.width - wpx, panX));
+  panY = hpx <= r.height ? (r.height - hpx) / 2 : Math.min(0, Math.max(r.height - hpx, panY));
+}
 function applyZoom() {
   // Pan first, then scale (origin 0,0). canvasPoint inverts this exactly.
+  clampPan();
   zoomLayerEl.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + zoom + ')';
   const lbl = document.getElementById('zoomLabel');
   if (lbl) lbl.textContent = Math.round(zoom * 100) + '%';
@@ -1290,6 +1320,17 @@ function setZoom(z) {
 }
 function zoomIn() { setZoom(zoom + ZOOM_STEP); }
 function zoomOut() { setZoom(zoom - ZOOM_STEP); }
+// Zoom level that fits the whole world on screen (used on first load).
+function fitZoom() {
+  const r = canvasEl.getBoundingClientRect();
+  if (!WORLD_W) return 1;
+  return Math.max(ZOOM_MIN, Math.min(r.width / WORLD_W, r.height / WORLD_H));
+}
+// Content coordinate at the center of the current view (for placing new items).
+function viewportCenterContent() {
+  const r = canvasEl.getBoundingClientRect();
+  return { x: (r.width / 2 - panX) / zoom, y: (r.height / 2 - panY) / zoom };
+}
 
 // ----- Two-finger pan + pinch zoom (mobile / tablet) -----
 function twoFingerInfo(e) {
@@ -1343,6 +1384,28 @@ function onGestureEnd(e) {
   window.removeEventListener('touchcancel', onGestureEnd);
 }
 
+// ----- Desktop pan: click-drag an empty canvas area to move the view -----
+function startCanvasPan(e) {
+  const sx = e.clientX, sy = e.clientY;
+  const startPanX = panX, startPanY = panY;
+  let moved = false;
+  const move = (ev) => {
+    const dx = ev.clientX - sx, dy = ev.clientY - sy;
+    if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+      moved = true;
+      canvasEl.classList.add('panning');
+    }
+    if (moved) { panX = startPanX + dx; panY = startPanY + dy; applyZoom(); }
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    canvasEl.classList.remove('panning');
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+}
+
 // Normalize mouse and touch events to a single {clientX, clientY}
 function evtPoint(e) {
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
@@ -1356,8 +1419,9 @@ function canvasPoint(e) {
   return { x: (p.clientX - r.left - panX) / zoom, y: (p.clientY - r.top - panY) / zoom };
 }
 function canvasSize() {
-  // Logical content size = unscaled canvas viewport (canvasEl is never scaled),
-  // so clamping bounds stay constant at every zoom level.
+  // The full working area ("world") — the bounds items can be placed/moved within.
+  // Falls back to the viewport before the world size is computed.
+  if (WORLD_W) return { w: WORLD_W, h: WORLD_H };
   const r = canvasEl.getBoundingClientRect();
   return { w: r.width, h: r.height };
 }
@@ -1464,7 +1528,8 @@ function startFreshCanvas() {
   const ta = document.getElementById('notesTextarea');
   if (ta) ta.value = '';
   try { localStorage.removeItem(NOTES_PERSIST_KEY); } catch (_) {}
-  zoom = 1; panX = 0; panY = 0; applyZoom();
+  // Reset the view to show the whole working area, like a fresh load.
+  zoom = fitZoom(); panX = 0; panY = 0; applyZoom();
   persistCanvas();
   updatePlaceholder();
 }
@@ -3335,11 +3400,12 @@ function nextPlaceOffset() {
 function placeFromSidebar(kind) {
   const cs = canvasSize();
   const off = nextPlaceOffset();
+  const vc = viewportCenterContent(); // place at the center of what the user sees
 
   if (kind === 'arrow' || kind === 'fence') {
     const len = 130;
-    const cx = cs.w / 2 + off;
-    const cy = Math.max(0, Math.min(cs.h, cs.h / 2 + off));
+    const cx = vc.x + off;
+    const cy = Math.max(0, Math.min(cs.h, vc.y + off));
     const x1 = Math.max(0, Math.min(cs.w - len, cx - len / 2));
     const x2 = x1 + len;
     const id = uid();
@@ -3357,8 +3423,8 @@ function placeFromSidebar(kind) {
 
   const def = PLACE_SIZES[kind];
   if (!def) return;
-  const x = Math.max(0, Math.min(cs.w - def.w, (cs.w - def.w) / 2 + off));
-  const y = Math.max(0, Math.min(cs.h - def.h, (cs.h - def.h) / 2 + off));
+  const x = Math.max(0, Math.min(cs.w - def.w, vc.x - def.w / 2 + off));
+  const y = Math.max(0, Math.min(cs.h - def.h, vc.y - def.h / 2 + off));
   addShape(kind, x, y, def.w, def.h); // selects the new shape
   // Open the panel so the user can immediately name / configure the new shape.
   openPanel();
@@ -3435,8 +3501,10 @@ function init() {
       state.drawing = { type: state.tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
       renderOverlay();
     } else if (state.tool == null) {
-      // Background tap → deselect (children stop propagation themselves)
+      // Background tap → deselect (children stop propagation themselves).
       deselect();
+      // Desktop: click-drag an empty area to pan. (Touch pans with two fingers.)
+      if (e.type === 'mousedown') startCanvasPan(e);
     }
   }
   canvasEl.addEventListener('mousedown', onCanvasDown);
@@ -3534,7 +3602,12 @@ function init() {
   }
   wireZoomButton(document.getElementById('zoomInBtn'), zoomIn);
   wireZoomButton(document.getElementById('zoomOutBtn'), zoomOut);
-  applyZoom(); // set initial transform + "100%" label
+  // Size the working area (2x the viewport) and fit the whole thing on screen.
+  computeWorldSize();
+  applyWorldSize();
+  zoom = fitZoom();
+  panX = 0; panY = 0;
+  applyZoom(); // clampPan centers the world; sets transform + label
 
   // Keyboard
   window.addEventListener('keydown', (e) => {
@@ -3561,8 +3634,9 @@ function init() {
     }
   });
 
-  // Reposition popup on resize
+  // Reposition popup + re-clamp the pan when the viewport changes size
   window.addEventListener('resize', () => {
+    applyZoom();
     if (state.selection) positionPanel();
   });
 
@@ -3627,9 +3701,10 @@ function init() {
         // don't get baked into the export.
         deselect();
         closeMeasurePopup();
-        // Always capture at 100% zoom with no pan (so the full plan fits) and hide
-        // the zoom buttons so they aren't baked into the PDF. Restored in finally.
-        zoomLayerEl.style.transform = 'translate(0px,0px) scale(1)';
+        // Fit the entire working area in the viewport so the whole plan is captured
+        // (the world is larger than the viewport). Hide the zoom buttons too.
+        // Restored in finally.
+        zoom = fitZoom(); panX = 0; panY = 0; applyZoom();
         if (zoomControlsEl) zoomControlsEl.style.visibility = 'hidden';
         // Yield one frame so the DOM updates land before we capture.
         await new Promise(r => requestAnimationFrame(r));
