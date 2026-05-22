@@ -330,8 +330,8 @@ svg.prev { width: 28px; height: 24px; }
 .canvas.tool-active .fence-hit,
 .canvas.tool-active .edge-strip-arrow { pointer-events: none; }
 
-.fence-hit { pointer-events: stroke; cursor: pointer; }
-.arrow-hit { pointer-events: stroke; cursor: pointer; }
+.fence-hit { pointer-events: stroke; cursor: pointer; touch-action: none; }
+.arrow-hit { pointer-events: stroke; cursor: pointer; touch-action: none; }
 .edge-strip-arrow { fill: transparent; cursor: pointer; pointer-events: all; }
 .edge-strip-arrow:hover { fill: rgba(96,165,250,0.3); }
 /* Edit button drawn inside a selected arrow / fence (re-enable clicks; .ov-item disables them) */
@@ -587,6 +587,7 @@ svg.prev { width: 28px; height: 24px; }
 .endpoint-handle {
   pointer-events: auto;
   cursor: grab;
+  touch-action: none; /* single-finger drag is handled by JS, never the browser */
   fill: #ffffff;
   stroke: #3b82f6;
 }
@@ -1945,6 +1946,18 @@ function createShapeEl(sh) {
   applyShapeVisual(sh);
 }
 
+// The label shown inside a shape. Road/driveway show the user's typed name (or
+// the default label when blank); the other fixed-label types ignore name.
+function displayNameFor(sh) {
+  if (sh.type === 'road') return sh.name || 'Road';
+  if (sh.type === 'driveway') return sh.name || 'Driveway';
+  if (sh.type === 'tree') return 'Tree';
+  if (sh.type === 'bush') return 'Bush';
+  if (sh.type === 'septic') return 'Septic Tank';
+  if (sh.type === 'wellhead') return 'Well Head';
+  return sh.name || '';
+}
+
 function applyShapeVisual(sh) {
   const el = shapeEls.get(sh.id);
   if (!el) return;
@@ -1997,15 +2010,8 @@ function applyShapeVisual(sh) {
     el.style.borderColor = stroke;
   }
 
-  let displayName = sh.name || '';
-  if (sh.type === 'road') displayName = 'Road';
-  else if (sh.type === 'driveway') displayName = 'Driveway';
-  else if (sh.type === 'tree') displayName = 'Tree';
-  else if (sh.type === 'bush') displayName = 'Bush';
-  else if (sh.type === 'septic') displayName = 'Septic Tank';
-  else if (sh.type === 'wellhead') displayName = 'Well Head';
   const nameEl = el.querySelector('.shape-name');
-  nameEl.textContent = displayName;
+  nameEl.textContent = displayNameFor(sh);
   nameEl.style.color = textColorOn(fill);
 
   rebuildSelectionAccessories(el, sh, !!isSel);
@@ -2375,11 +2381,14 @@ function bakeRotation(ent) {
 }
 
 // Drag one endpoint of an arrow / fence: that end follows the pointer while the
-// other end stays fixed (adjusts length + direction). Works for mouse and touch.
+// other end stays fixed (adjusts length + direction). Uses Pointer Events with
+// pointer capture on the (stable) canvas, so a SINGLE finger keeps driving the
+// drag even though renderOverlay recreates the handle each frame — this is what
+// fixes the mobile "needs a second finger" bug. Mouse behaves exactly as before.
 let draggingEndpoint = null; // { kind, id, which } while an endpoint is being dragged
 function startEndpointDrag(kind, id, which, e) {
-  if (e.type === 'mousedown' && e.button !== 0) return;
-  if (e.type === 'touchstart') e.preventDefault();
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();   // stop the canvas from panning/scrolling immediately
   e.stopPropagation();
   closeMeasurePopup();
   const ent = kind === 'arrow' ? state.arrows.find(a => a.id === id)
@@ -2387,9 +2396,12 @@ function startEndpointDrag(kind, id, which, e) {
   if (!ent) return;
   bakeRotation(ent);                 // drag in plain content space
   draggingEndpoint = { kind, id, which };
+  const pid = e.pointerId;
+  try { canvasEl.setPointerCapture(pid); } catch (_) {}
   renderOverlay();
   const move = (ev) => {
-    if (ev.type === 'touchmove' && ev.cancelable) ev.preventDefault();
+    if (ev.pointerId !== pid) return; // track only this one touch / pointer
+    ev.preventDefault();
     const p = canvasPoint(ev);
     const cs = canvasSize();
     const nx = Math.max(0, Math.min(cs.w, p.x));
@@ -2399,21 +2411,59 @@ function startEndpointDrag(kind, id, which, e) {
     renderOverlay();
     if (state.panelOpen) positionPanel();
   };
-  const up = () => {
-    window.removeEventListener('mousemove', move);
-    window.removeEventListener('mouseup', up);
-    window.removeEventListener('touchmove', move);
-    window.removeEventListener('touchend', up);
-    window.removeEventListener('touchcancel', up);
+  const finish = () => {
+    canvasEl.removeEventListener('pointermove', move);
+    canvasEl.removeEventListener('pointerup', onUp);
+    canvasEl.removeEventListener('pointercancel', onUp);
+    try { canvasEl.releasePointerCapture(pid); } catch (_) {}
+    activeDrag = null;
     draggingEndpoint = null;
     renderOverlay();
     persistCanvas();
   };
-  window.addEventListener('mousemove', move);
-  window.addEventListener('mouseup', up);
-  window.addEventListener('touchmove', move, { passive: false });
-  window.addEventListener('touchend', up);
-  window.addEventListener('touchcancel', up);
+  const onUp = (ev) => { if (ev.pointerId !== pid) return; finish(); };
+  activeDrag = finish; // let a two-finger gesture cancel this drag
+  canvasEl.addEventListener('pointermove', move);
+  canvasEl.addEventListener('pointerup', onUp);
+  canvasEl.addEventListener('pointercancel', onUp);
+}
+
+// Move a whole arrow / fence (drag its body). Pointer-event based with capture
+// for the same reason as the endpoints — keeps single-finger touch dragging
+// reliable even though renderOverlay recreates the line each frame.
+function startLineMove(kind, ent, e) {
+  const sx = e.clientX, sy = e.clientY;
+  const ox1 = ent.x1, oy1 = ent.y1, ox2 = ent.x2, oy2 = ent.y2;
+  let moved = false;
+  const pid = e.pointerId;
+  closeMeasurePopup();
+  try { canvasEl.setPointerCapture(pid); } catch (_) {}
+  const apply = (ddx, ddy) => {
+    ent.x1 = ox1 + ddx; ent.y1 = oy1 + ddy;
+    ent.x2 = ox2 + ddx; ent.y2 = oy2 + ddy;
+    renderOverlay();
+  };
+  const move = (ev) => {
+    if (ev.pointerId !== pid) return;
+    const dxs = ev.clientX - sx, dys = ev.clientY - sy;
+    if (!moved && Math.hypot(dxs, dys) > DRAG_THRESHOLD) moved = true;
+    if (moved) { ev.preventDefault(); apply(dxs / zoom, dys / zoom); if (state.panelOpen) positionPanel(); }
+  };
+  const finish = (cancel) => {
+    canvasEl.removeEventListener('pointermove', move);
+    canvasEl.removeEventListener('pointerup', onUp);
+    canvasEl.removeEventListener('pointercancel', onUp);
+    try { canvasEl.releasePointerCapture(pid); } catch (_) {}
+    activeDrag = null;
+    if (cancel) apply(0, 0);          // two-finger gesture took over → revert
+    else if (moved) persistCanvas();
+    else handleItemTap(kind, ent.id); // clean tap → select / double-tap to edit
+  };
+  const onUp = (ev) => { if (ev.pointerId !== pid) return; finish(false); };
+  activeDrag = () => finish(true);
+  canvasEl.addEventListener('pointermove', move);
+  canvasEl.addEventListener('pointerup', onUp);
+  canvasEl.addEventListener('pointercancel', onUp);
 }
 
 // A draggable endpoint handle (circle) for a selected arrow / fence. Sized in
@@ -2428,9 +2478,8 @@ function makeEndpointHandleSvg(kind, id, which, x, y) {
   c.setAttribute('cy', y);
   c.setAttribute('r', 12 / zoom);                 // ~24px diameter on screen
   c.setAttribute('stroke-width', 3 / zoom);
-  const start = (ev) => startEndpointDrag(kind, id, which, ev);
-  c.addEventListener('mousedown', start);
-  c.addEventListener('touchstart', start, { passive: false });
+  const start = (ev) => { if (!gesture) startEndpointDrag(kind, id, which, ev); };
+  c.addEventListener('pointerdown', start);
   return c;
 }
 
@@ -2584,23 +2633,18 @@ function renderOverlay() {
     hit.setAttribute('stroke', 'transparent');
     hit.setAttribute('stroke-width', '14');
     const onFenceStart = (e) => {
-      if (e.type === 'mousedown' && e.button !== 0) return;
-      if (e.type === 'touchstart') e.preventDefault();
+      if (gesture) return; // a two-finger gesture owns the touch
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
       e.stopPropagation();
       // One press, no waiting: pressing an end grabs that endpoint; selection is
       // immediate so every handle is live at once.
       const which = nearEndpoint(f, e);
       if (!isSelected('fence', f.id)) selectEntity('fence', f.id);
       if (which) { startEndpointDrag('fence', f.id, which, e); return; }
-      const ox1 = f.x1, oy1 = f.y1, ox2 = f.x2, oy2 = f.y2;
-      beginItemPointer('fence', f.id, e, (ddx, ddy) => {
-        f.x1 = ox1 + ddx; f.y1 = oy1 + ddy;
-        f.x2 = ox2 + ddx; f.y2 = oy2 + ddy;
-        renderOverlay();
-      });
+      startLineMove('fence', f, e);
     };
-    hit.addEventListener('mousedown', onFenceStart);
-    hit.addEventListener('touchstart', onFenceStart, { passive: false });
+    hit.addEventListener('pointerdown', onFenceStart);
     g.appendChild(hit);
 
     // Auto "Fence" label, just above the midpoint of the line
@@ -2746,23 +2790,18 @@ function renderOverlay() {
     hit.setAttribute('stroke', 'transparent');
     hit.setAttribute('stroke-width', '14');
     const onArrowStart = (e) => {
-      if (e.type === 'mousedown' && e.button !== 0) return;
-      if (e.type === 'touchstart') e.preventDefault();
+      if (gesture) return; // a two-finger gesture owns the touch
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
       e.stopPropagation();
       // One press, no waiting: pressing an end grabs that endpoint; selection is
       // immediate so every handle is live at once.
       const which = nearEndpoint(a, e);
       if (!isSelected('arrow', a.id)) selectEntity('arrow', a.id);
       if (which) { startEndpointDrag('arrow', a.id, which, e); return; }
-      const ox1 = a.x1, oy1 = a.y1, ox2 = a.x2, oy2 = a.y2;
-      beginItemPointer('arrow', a.id, e, (ddx, ddy) => {
-        a.x1 = ox1 + ddx; a.y1 = oy1 + ddy;
-        a.x2 = ox2 + ddx; a.y2 = oy2 + ddy;
-        renderOverlay();
-      });
+      startLineMove('arrow', a, e);
     };
-    hit.addEventListener('mousedown', onArrowStart);
-    hit.addEventListener('touchstart', onArrowStart, { passive: false });
+    hit.addEventListener('pointerdown', onArrowStart);
     g.appendChild(hit);
 
     // Distance label centered at the arrow midpoint
@@ -2988,7 +3027,9 @@ function renderPanel() {
       const label = sh.type === 'driveway' ? 'Driveway' : 'Road';
       html =
         '<div class="entity-label">' + label + '</div>' +
-        '<div class="title">Color</div>' + swatches +
+        '<div class="title">Name</div>' +
+        '<input type="text" data-role="name" value="' + escHtml(sh.name) + '" placeholder="' + label + '" autocomplete="off">' +
+        '<div class="title" style="margin-top:12px;">Color</div>' + swatches +
         sizeBlockHtml(sh) +
         '<div class="row">' +
           '<button class="danger" data-role="delete" type="button">Delete</button>' +
@@ -3135,7 +3176,7 @@ function wirePanel() {
       if (sh) {
         sh.name = name;
         const el = shapeEls.get(sh.id);
-        if (el) el.querySelector('.shape-name').textContent = name;
+        if (el) el.querySelector('.shape-name').textContent = displayNameFor(sh);
       }
       tryRecord();
     };
@@ -3147,7 +3188,7 @@ function wirePanel() {
       if (!sh) return;
       sh.name = nameInput.value;
       const el = shapeEls.get(sh.id);
-      if (el) el.querySelector('.shape-name').textContent = sh.name;
+      if (el) el.querySelector('.shape-name').textContent = displayNameFor(sh);
     });
     nameInput.addEventListener('blur', tryRecord);
     nameInput.addEventListener('keydown', (e) => {
